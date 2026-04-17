@@ -1,0 +1,255 @@
+"""
+Memory Consolidation Workflow
+
+并不由llm调用，而是被动触发。
+
+自动化记忆整合流程，基于双重触发机制：
+1. 消息数触发：未整合消息 ≥ 30 条
+2. Token 数触发：未整合 tokens ≥ 8000
+3. 上下文预算检查：总上下文 ≥ 16000 tokens
+
+整合方式：
+- LLM 调用 save_memory 工具
+- 结果通过 LongTermMemory 和 HistoryLog 封装类写入
+"""
+
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List
+
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+from core.base_workflow import BaseWorkflow
+from core.token_counter import TokenCounter
+from memory.long_term import LongTermMemory
+from memory.history import HistoryLog
+
+
+class MemoryConsolidationWorkflow(BaseWorkflow):
+    """记忆整合 Workflow"""
+
+    @property
+    def name(self) -> str:
+        return "memory_consolidation"
+
+    @property
+    def description(self) -> str:
+        return "Consolidate session messages into long-term memory and history log."
+
+    @property
+    def required_tools(self) -> List[str]:
+        return []
+
+    # ========== 配置 ==========
+    MAX_MESSAGES_BEFORE_CONSOLIDATION = 30
+    MESSAGES_TO_KEEP = 15
+
+    MAX_TOKENS_BEFORE_CONSOLIDATION = 8000
+    TOKENS_TO_CONSOLIDATION_RATIO = 0.5
+
+    MEMORY_INJECTION_TOKENS = 2000
+    TOTAL_CONTEXT_BUDGET = 16000
+
+    # save_memory 工具定义
+    SAVE_MEMORY_TOOL = [{
+        "type": "function",
+        "function": {
+            "name": "save_memory",
+            "description": "Save the memory consolidation result to persistent storage.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "history_entry": {
+                        "type": "string",
+                        "description": "A paragraph summarizing key events/decisions/topics. "
+                                        "Start with [YYYY-MM-DD HH:MM]. Include detail useful for grep search.",
+                    },
+                    "memory_update": {
+                        "type": "string",
+                        "description": "Full updated long-term memory as markdown. Include all existing "
+                                       "facts plus new ones. Return unchanged if nothing new.",
+                    },
+                },
+                "required": ["history_entry", "memory_update"],
+            },
+        }
+    }]
+
+    def __init__(self, long_term_memory: LongTermMemory, history_log: HistoryLog,
+                 llm_client, config: Dict = None):
+        self.long_term_memory = long_term_memory
+        self.history_log = history_log
+        self.llm = llm_client
+        self._consecutive_failures = 0
+        self._max_failures = 3
+
+        if config:
+            self.MAX_MESSAGES_BEFORE_CONSOLIDATION = config.get(
+                "max_messages", self.MAX_MESSAGES_BEFORE_CONSOLIDATION
+            )
+            self.MESSAGES_TO_KEEP = config.get(
+                "messages_to_keep", self.MESSAGES_TO_KEEP
+            )
+            self.MAX_TOKENS_BEFORE_CONSOLIDATION = config.get(
+                "max_tokens", self.MAX_TOKENS_BEFORE_CONSOLIDATION
+            )
+
+    def should_consolidate(self, session_data: Dict) -> bool:
+        messages = session_data.get("messages", [])
+        total_messages = len(messages)
+
+        if total_messages >= self.MAX_MESSAGES_BEFORE_CONSOLIDATION:
+            logger.info(
+                f"Consolidation triggered by message count: "
+                f"{total_messages}/{self.MAX_MESSAGES_BEFORE_CONSOLIDATION}"
+            )
+            return True
+
+        token_count = TokenCounter.count_messages_tokens(messages)
+        if token_count >= self.MAX_TOKENS_BEFORE_CONSOLIDATION:
+            logger.info(
+                f"Consolidation triggered by token count: "
+                f"{token_count}/{self.MAX_TOKENS_BEFORE_CONSOLIDATION}"
+            )
+            return True
+
+        total_tokens = self._estimate_total_context(session_data)
+        if total_tokens >= self.TOTAL_CONTEXT_BUDGET:
+            logger.warning(
+                f"Context budget exceeded: {total_tokens}/{self.TOTAL_CONTEXT_BUDGET}"
+            )
+            return True
+
+        return False
+
+    def get_messages_to_consolidate(self, session_data: Dict) -> List[Dict]:
+        messages = session_data.get("messages", [])
+
+        if len(messages) >= self.MAX_MESSAGES_BEFORE_CONSOLIDATION:
+            if len(messages) <= self.MESSAGES_TO_KEEP:
+                return []
+            messages_to_consolidate = messages[:-self.MESSAGES_TO_KEEP]
+            return messages_to_consolidate
+
+        token_count = TokenCounter.count_messages_tokens(messages)
+        if token_count >= self.MAX_TOKENS_BEFORE_CONSOLIDATION:
+            target_tokens = int(token_count * (1 - self.TOKENS_TO_CONSOLIDATION_RATIO))
+            accumulated = 0
+            for i, msg in enumerate(messages):
+                accumulated += TokenCounter.count_messages_tokens([msg])
+                if accumulated > target_tokens:
+                    return messages[:max(1, i)]
+
+        return messages[:max(1, len(messages) // 2)]
+
+    async def execute(self, tools: Any = None, **kwargs) -> Any:
+        session_data = kwargs.get("session_data", {})
+        messages_to_consolidate = self.get_messages_to_consolidate(session_data)
+
+        if not messages_to_consolidate:
+            return True
+
+        current_memory = self.long_term_memory.read()
+
+        prompt = f"""You are a memory consolidation agent. Analyze the conversation and extract important information.
+
+## Current Long-term Memory
+{current_memory or "(empty)"}
+
+## Conversation to Process
+{self._format_messages(messages_to_consolidate)}
+
+## CRITICAL INSTRUCTION
+You MUST call the `save_memory` tool now. Do NOT respond with text only.
+Call the tool with history_entry and memory_update parameters.
+
+Parameters:
+- history_entry: [YYYY-MM-DD HH:MM] Summary of conversation with key details
+- memory_update: Full updated MEMORY.md content (include all existing facts plus new ones)"""
+
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                llm_with_tools = self.llm.bind_tools(self.SAVE_MEMORY_TOOL)
+
+                from langchain_core.messages import HumanMessage
+                response = await llm_with_tools.ainvoke([
+                    HumanMessage(content=prompt)
+                ])
+
+                if not hasattr(response, "tool_calls") or not response.tool_calls:
+                    if attempt < max_retries - 1:
+                        continue
+                    return self._fail_or_raw_archive(messages_to_consolidate)
+
+                tool_call = response.tool_calls[0]
+
+                if tool_call.get("name") != "save_memory":
+                    if attempt < max_retries - 1:
+                        continue
+                    return self._fail_or_raw_archive(messages_to_consolidate)
+
+                args = tool_call.get("args", {})
+                if isinstance(args, str):
+                    args = json.loads(args)
+
+                history_entry = args.get("history_entry", "")
+                memory_update = args.get("memory_update", "")
+
+                if not history_entry or not memory_update:
+                    if attempt < max_retries - 1:
+                        continue
+                    return self._fail_or_raw_archive(messages_to_consolidate)
+
+                self.history_log.append(history_entry)
+                if memory_update != current_memory:
+                    self.long_term_memory.write(memory_update)
+
+                self._consecutive_failures = 0
+                return True
+
+            except Exception:
+                if attempt < max_retries - 1:
+                    continue
+                return self._fail_or_raw_archive(messages_to_consolidate)
+
+        return self._fail_or_raw_archive(messages_to_consolidate)
+
+    def _format_messages(self, messages: List[Dict]) -> str:
+        lines = []
+        for msg in messages:
+            if not msg.get("content"):
+                continue
+            role = msg.get("role", "unknown").upper()
+            content = msg["content"]
+            if isinstance(content, list):
+                content = " ".join(
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+            timestamp = msg.get("timestamp", "?")[:16]
+            tools = f" [tools: {', '.join(msg['tools_used'])}]" if msg.get("tools_used") else ""
+            lines.append(f"[{timestamp}] {role}{tools}: {content}")
+        return "\n".join(lines)
+
+    def _estimate_total_context(self, session_data: Dict) -> int:
+        messages = session_data.get("messages", [])
+        memory_tokens = TokenCounter.estimate_tokens(self.long_term_memory.read())
+        messages_tokens = TokenCounter.count_messages_tokens(messages)
+        return memory_tokens + messages_tokens + 500
+
+    def _fail_or_raw_archive(self, messages: List[Dict]) -> bool:
+        self._consecutive_failures += 1
+
+        if self._consecutive_failures < self._max_failures:
+            return False
+
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self.history_log.append(
+            f"[{ts}] [RAW] {len(messages)} messages\n{self._format_messages(messages)}"
+        )
+        self._consecutive_failures = 0
+        return True

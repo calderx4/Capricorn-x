@@ -1,0 +1,68 @@
+{
+  "workspace": {
+    "root": "./workspace",
+    "memory_dir": "memory",
+    "session_dir": "sessions"
+  },
+
+  "llm": {
+    "provider": "openai",
+    "model": "MiniMax-M2.7",
+    "api_key": "${MINIMAX_API_KEY}",
+    "api_base": "https://api.minimaxi.com/v1",
+    "temperature": 0.0,
+    "max_tokens": 4096
+  },
+
+  "mcp_servers": {
+    "amap": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@amap/amap-maps-mcp-server"],
+      "env": {
+        "AMAP_MAPS_API_KEY": "${AMAP_MAPS_API_KEY}"
+      },
+      "enabled": true,
+      "enabled_tools": ["*"],
+      "tool_timeout": 30
+    },
+    "filesystem": {
+      "type": "stdio",
+      "command": "mcp-server-filesystem",
+      "args": ["--root", "/path/to/root"],
+      "env": {},
+      "enabled": false,
+      "enabled_tools": ["*"],
+      "tool_timeout": 30
+    },
+    "web_search": {
+      "type": "sse",
+      "url": "http://localhost:8080/sse",
+      "headers": {
+        "Authorization": "Bearer ${MCP_API_KEY}"
+      },
+      "enabled": false,
+      "enabled_tools": ["search", "fetch"],
+      "tool_timeout": 60
+    }
+  },
+
+  "hooks": {
+    "memory_consolidation": {
+      "enabled": true,
+      "message_threshold": 20,
+      "messages_to_keep": 10,
+      "token_threshold": 8000
+    }
+  },
+
+  "skills": {
+    "skills_dir": "capabilities/skills/skills",
+    "preload_always": true
+  },
+
+  "agent": {
+    "max_stack_depth": 10,
+    "enable_state_tracking": true
+  }
+}
