@@ -1,0 +1,119 @@
+"""
+MCP Tool Wrapper - MCP 工具包装器
+
+将 MCP 工具包装成 BaseTool 格式。
+"""
+
+import asyncio
+from typing import Any, Dict
+from loguru import logger
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+from core.base_tool import BaseTool
+
+
+class MCPToolWrapper(BaseTool):
+    """MCP 工具包装器"""
+
+    def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30):
+        """
+        初始化 MCP 工具包装器
+
+        Args:
+            session: MCP 会话
+            server_name: 服务器名称
+            tool_def: 工具定义
+            tool_timeout: 超时时间（秒）
+        """
+        self._session = session
+        self._original_name = tool_def.name
+        self._name = f"mcp_{server_name}_{tool_def.name}"
+        self._description = tool_def.description or tool_def.name
+        raw_schema = tool_def.inputSchema or {"type": "object", "properties": {}}
+        self._parameters = self._normalize_schema(raw_schema)
+        self._tool_timeout = tool_timeout
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return self._description
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return self._parameters
+
+    async def execute(self, **kwargs: Any) -> str:
+        """执行 MCP 工具"""
+        try:
+            result = await asyncio.wait_for(
+                self._session.call_tool(self._original_name, arguments=kwargs),
+                timeout=self._tool_timeout,
+            )
+            return self._parse_result(result)
+        except asyncio.TimeoutError:
+            logger.error(f"MCP tool '{self._name}' timed out after {self._tool_timeout}s")
+            return f"Error: MCP tool call timed out after {self._tool_timeout}s"
+        except Exception as exc:
+            logger.error(f"MCP tool '{self._name}' failed: {exc}")
+            return f"Error: MCP tool call failed: {type(exc).__name__}: {str(exc)}"
+
+    def _normalize_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        规范化 JSON Schema
+
+        确保Schema 符合标准格式。
+
+        Args:
+            schema: 原始 Schema
+
+        Returns:
+            规范化后的 Schema
+        """
+        # 确保 type 字段存在
+        if "type" not in schema:
+            schema["type"] = "object"
+
+        # 确保 properties 字段存在（对于 object 类型）
+        if schema.get("type") == "object" and "properties" not in schema:
+            schema["properties"] = {}
+
+        # 确保 required 字段是列表
+        if "required" in schema and not isinstance(schema["required"], list):
+            schema["required"] = []
+
+        return schema
+
+    def _parse_result(self, result: Any) -> str:
+        """
+        解析 MCP 工具调用结果
+
+        Args:
+            result: MCP 返回的结果
+
+        Returns:
+            字符串格式的结果
+        """
+        if isinstance(result, str):
+            return result
+
+        if isinstance(result, dict):
+            # 尝试提取文本内容
+            if "content" in result:
+                content = result["content"]
+                if isinstance(content, list):
+                    # 处理内容列表
+                    texts = []
+                    for item in content:
+                        if isinstance(item, dict) and "text" in item:
+                            texts.append(item["text"])
+                    return "\n".join(texts)
+                return str(content)
+            return str(result)
+
+        return str(result)
