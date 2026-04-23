@@ -95,6 +95,9 @@ class MemoryConsolidationWorkflow(BaseWorkflow):
             self.MAX_TOKENS_BEFORE_CONSOLIDATION = config.get(
                 "max_tokens", self.MAX_TOKENS_BEFORE_CONSOLIDATION
             )
+            self.TOTAL_CONTEXT_BUDGET = config.get(
+                "context_budget", self.TOTAL_CONTEXT_BUDGET
+            )
 
     def should_consolidate(self, session_data: Dict) -> bool:
         messages = session_data.get("messages", [])

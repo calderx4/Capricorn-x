@@ -8,8 +8,6 @@ MCP Client Manager - MCP 服务器连接和工具注册
 """
 
 import asyncio
-import os
-import re
 from contextlib import AsyncExitStack
 from typing import Any, Dict
 from loguru import logger
@@ -18,29 +16,16 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from config.settings import MCPServerConfig
+from config.settings import Config, MCPServerConfig
 from capabilities.tools.registry import ToolRegistry
 from .mcp_wrapper import MCPToolWrapper
-
-
-def _resolve_env_vars(value: str) -> str:
-    """解析字符串中的 ${VAR} 环境变量引用"""
-    if not isinstance(value, str):
-        return value
-    return re.sub(r'\$\{([^}]+)\}', lambda m: os.environ.get(m.group(1), m.group(0)), value)
 
 
 def _resolve_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
     """解析 headers 中所有环境变量"""
     if not headers:
         return {}
-    resolved = {}
-    for k, v in headers.items():
-        if isinstance(v, str):
-            resolved[k] = _resolve_env_vars(v)
-        else:
-            resolved[k] = v
-    return resolved
+    return Config._resolve_env_vars(headers)
 
 
 class MCPClientManager:

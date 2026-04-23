@@ -8,6 +8,7 @@ Tool Registry - 工具注册和执行
 """
 
 import asyncio
+import json
 from typing import Dict, List, Any, Optional
 from loguru import logger
 
@@ -71,16 +72,7 @@ class ToolRegistry:
         return [tool.to_langchain_tool() for tool in self._tools.values()]
 
     async def execute(self, name: str, params: Dict[str, Any]) -> Any:
-        """
-        执行工具
-
-        Args:
-            name: 工具名称
-            params: 工具参数
-
-        Returns:
-            执行结果
-        """
+        """执行工具"""
         _HINT = "\n\n[Analyze the error above and try a different approach.]"
 
         tool = self._tools.get(name)
@@ -91,21 +83,21 @@ class ToolRegistry:
         try:
             logger.debug(f"Executing tool: {name}")
 
-            # 1. 参数类型转换
             params = tool.cast_params(params)
 
-            # 2. 参数验证
             errors = tool.validate_params(params)
             if errors:
                 logger.warning(f"Tool {name} validation failed: {'; '.join(errors)}")
                 return f"Error: Invalid parameters: {'; '.join(errors)}{_HINT}"
 
-            # 3. 执行
             result = await tool.execute(**params)
 
-            # 4. 检查错误返回
             if isinstance(result, str) and result.startswith("Error"):
                 return result + _HINT
+
+            # 结构化：dict/list → JSON 字符串
+            if isinstance(result, (dict, list)):
+                return json.dumps(result, ensure_ascii=False)
 
             return result
 
@@ -114,15 +106,7 @@ class ToolRegistry:
             return f"Error executing {name}: {str(e)}{_HINT}"
 
     async def execute_batch(self, tool_calls: List[Dict[str, Any]]) -> List[Any]:
-        """
-        并发执行多个工具调用
-
-        Args:
-            tool_calls: 工具调用列表，格式: [{"name": "...", "arguments": {...}}]
-
-        Returns:
-            结果列表
-        """
+        """并发执行多个工具调用"""
         tasks = [
             self.execute(call["name"], call["arguments"])
             for call in tool_calls
@@ -130,7 +114,6 @@ class ToolRegistry:
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # 处理异常
         processed = []
         for result in results:
             if isinstance(result, Exception):

@@ -9,7 +9,7 @@ from .settings import (
     WorkspaceConfig,
     LLMConfig,
     MCPServerConfig,
-    HooksConfig,
+    MemoryConfig,
 )
 
 __all__ = [
@@ -17,5 +17,5 @@ __all__ = [
     "WorkspaceConfig",
     "LLMConfig",
     "MCPServerConfig",
-    "HooksConfig",
+    "MemoryConfig",
 ]

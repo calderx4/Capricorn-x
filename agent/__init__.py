@@ -1,14 +1,13 @@
 """
 Agent module - Agent 层
 
-提供 LangGraph Agent 和执行器。
+提供原生 Function Calling Agent 和执行器。
 """
 
-from .agent import CapricornGraph, AgentState
+from .agent import CapricornGraph
 from .executor import CapricornAgent
 
 __all__ = [
     "CapricornGraph",
-    "AgentState",
     "CapricornAgent",
 ]

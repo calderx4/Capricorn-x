@@ -1,38 +1,33 @@
 """
-Agent - LangGraph ReAct Agent 实现
+Agent - 原生 Function Calling 循环
 
 职责：
-- 定义 Agent 状态
-- 实现节点逻辑（think + act）
-- 构建状态图
-- 管理执行状态
+- 构建 System Prompt
+- FC 循环：LLM 调用 → 工具执行 → 终止判断
+- 并发工具执行
+- 迭代上限和熔断保护
 """
 
-from typing import Dict, Any, Annotated, Sequence, TypedDict
-from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, BaseMessage
+import asyncio
+from datetime import datetime
+from typing import Dict
+
+from langchain_core.messages import (
+    HumanMessage, AIMessage, SystemMessage, ToolMessage, BaseMessage,
+)
 from loguru import logger
 
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from core.utils import strip_thinking_tags
 
-
-class AgentState(TypedDict):
-    """Agent 状态"""
-    messages: Annotated[Sequence[BaseMessage], add_messages]
-    session: Any  # Session 对象
-    tools_used: list[str]
-
-
-# ============================================================================
-# 图构建
-# ============================================================================
 
 class CapricornGraph:
-    """Capricorn Agent 图 - ReAct 模式"""
+    """Capricorn Agent — 原生 Function Calling 循环"""
+
+    MAX_ITERATIONS = 50
 
     def __init__(
         self,
@@ -41,207 +36,101 @@ class CapricornGraph:
         session_manager,
         long_term_memory,
         history_log,
-        llm_client=None
+        llm_client=None,
+        sandbox: bool = True,
     ):
-        """
-        初始化图
-
-        Args:
-            capability_registry: 能力注册中心
-            skill_manager: 技能管理器
-            session_manager: 会话管理器
-            long_term_memory: 长期记忆
-            history_log: 历史日志
-            llm_client: LLM 客户端
-        """
         self.capability_registry = capability_registry
         self.skill_manager = skill_manager
         self.session_manager = session_manager
         self.long_term_memory = long_term_memory
         self.history_log = history_log
         self.llm_client = llm_client
+        self.sandbox = sandbox
 
-        # 构建图
-        self.graph = self._build_graph()
-
-    def _build_graph(self) -> StateGraph:
-        """构建状态图 - ReAct 模式"""
-        # 获取 LangChain 工具
-        tools = self.capability_registry.get_langchain_tools()
-        tool_map = {t.name: t for t in tools}
-
-        # 绑定工具到 LLM
+        # 预绑定工具
         if self.llm_client:
-            llm_with_tools = self.llm_client.bind_tools(tools)
+            tools = self.capability_registry.get_langchain_tools()
+            self._tool_map = {t.name: t for t in tools}
+            self._llm_with_tools = self.llm_client.bind_tools(tools)
         else:
+            self._tool_map = {}
+            self._llm_with_tools = None
             logger.warning("LLM client not initialized")
-            llm_with_tools = None
-
-        # 节点：思考
-        async def think(state: AgentState):
-            """思考节点 - 调用 LLM 决定下一步"""
-            logger.info("🤔 Thinking... calling LLM")
-
-            if not llm_with_tools:
-                return {
-                    "messages": [AIMessage(content="LLM 客户端未初始化")],
-                    "tools_used": state.get("tools_used", [])
-                }
-
-            # 调用 LLM
-            try:
-                response = await llm_with_tools.ainvoke(state["messages"])
-                logger.info(f"✓ LLM response received, type: {type(response).__name__}")
-            except Exception as e:
-                logger.error(f"✗ LLM call failed: {e}")
-                return {
-                    "messages": [AIMessage(content=f"LLM 调用失败: {str(e)}")],
-                    "tools_used": state.get("tools_used", [])
-                }
-
-            # 检查是否有工具调用
-            if hasattr(response, "tool_calls") and response.tool_calls:
-                logger.info(f"🔧 LLM decided to use tools: {[tc['name'] for tc in response.tool_calls]}")
-            else:
-                logger.info("💬 LLM returned text response")
-
-            return {
-                "messages": [response],
-                "tools_used": state.get("tools_used", [])
-            }
-
-        # 节点：执行工具
-        async def act(state: AgentState):
-            """执行节点 - 执行工具调用"""
-            last_message = state["messages"][-1]
-
-            if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
-                return state
-
-            tool_messages = []
-            tools_used = state.get("tools_used", [])
-
-            # 执行所有工具调用
-            for call in last_message.tool_calls:
-                tool_name = call["name"]
-                tool_args = call["args"]
-
-                logger.debug(f"Executing tool: {tool_name} with args: {tool_args}")
-
-                try:
-                    # 执行工具
-                    result = await tool_map[tool_name].ainvoke(tool_args)
-                    content = str(result)
-                    logger.info(f"  🔧 {tool_name} -> {content[:100]}")
-                except Exception as e:
-                    content = f"Error: {e}"
-                    logger.error(f"Tool {tool_name} failed: {e}")
-
-                tools_used.append(tool_name)
-                tool_messages.append(ToolMessage(content=content, tool_call_id=call["id"]))
-
-            return {"messages": tool_messages, "tools_used": tools_used}
-
-        # 条件：是否继续
-        def should_continue(state: AgentState):
-            """判断是否继续执行工具"""
-            last_message = state["messages"][-1]
-
-            if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                return "act"
-            return "end"
-
-        # 构建图
-        graph = StateGraph(AgentState)
-
-        # 添加节点
-        graph.add_node("think", think)
-        graph.add_node("act", act)
-
-        # 设置入口
-        graph.set_entry_point("think")
-
-        # 添加边
-        graph.add_conditional_edges(
-            "think",
-            should_continue,
-            {"act": "act", "end": END}
-        )
-        graph.add_edge("act", "think")
-
-        # 编译图
-        return graph.compile()
 
     async def run(self, user_input: str, thread_id: str = "default") -> str:
-        """
-        运行 Agent
-
-        Args:
-            user_input: 用户输入
-            thread_id: 会话 ID
-
-        Returns:
-            响应结果
-        """
+        """运行 FC 循环"""
         logger.info(f"Running agent with thread_id: {thread_id}")
 
-        # 加载或创建 session
         session = self.session_manager.get_session(thread_id)
-
-        # 添加用户消息
         session.add_message("user", user_input)
 
-        # 构建系统提示
         system_prompt = self._build_system_prompt()
+        history_messages = session.get_history(max_messages=0)
 
-        # 加载历史消息
-        history_messages = session.get_history(max_messages=0)  # 加载所有未整合消息
-
-        # 构建消息列表
         messages = [
-            HumanMessage(content=system_prompt),
+            SystemMessage(content=system_prompt),
             *[self._dict_to_message(msg) for msg in history_messages],
-            HumanMessage(content=user_input)
+            HumanMessage(content=user_input),
         ]
 
+        if not self._llm_with_tools:
+            return "LLM 客户端未初始化"
+
+        tools_used = []
+
         try:
-            # 执行图
-            result_state = await self.graph.ainvoke({
-                "messages": messages,
-                "session": session,
-                "tools_used": []
-            })
+            for i in range(self.MAX_ITERATIONS):
+                logger.info(f"Thinking... (iteration {i + 1})")
+                response = await self._llm_with_tools.ainvoke(messages)
+                messages.append(response)
 
-            # 提取最终回复
-            last_message = result_state["messages"][-1]
-            response = self._extract_content(last_message)
+                if not (hasattr(response, "tool_calls") and response.tool_calls):
+                    break
 
-            logger.debug(f"Reply length: {len(response)} chars")
+                tool_names = [tc["name"] for tc in response.tool_calls]
+                logger.info(f"Tool calls: {tool_names}")
 
-            # 添加助手回复
-            tools_used = result_state.get("tools_used", [])
-            session.add_message("assistant", response, tools_used=tools_used)
+                # 并发执行工具
+                tool_messages = await self._execute_tools(response.tool_calls)
+                messages.extend(tool_messages)
+                tools_used.extend(tool_names)
 
-            # 保存 session
+            final_response = self._extract_content(messages[-1])
+            session.add_message("assistant", final_response, tools_used=tools_used)
             self.session_manager.save_session(session)
-
-            return response
+            return final_response
 
         except Exception as e:
             logger.error(f"Agent execution failed: {e}")
             return f"执行失败: {str(e)}"
 
+    async def _execute_tools(self, tool_calls) -> list:
+        async def _run_one(call):
+            name, args = call["name"], call["args"]
+            try:
+                result = await self._tool_map[name].ainvoke(args)
+                content = str(result)
+                logger.info(f"  {name} -> {content[:100]}")
+            except Exception as e:
+                content = f"Error: {e}"
+                logger.error(f"Tool {name} failed: {e}")
+            return ToolMessage(content=content, tool_call_id=call["id"])
+
+        return await asyncio.gather(*[_run_one(tc) for tc in tool_calls])
+
     def _dict_to_message(self, msg: Dict) -> BaseMessage:
-        """将字典转换为 LangChain 消息"""
         role = msg.get("role", "user")
         content = msg.get("content", "")
-        return HumanMessage(content=content) if role == "user" else AIMessage(content=content)
+        if role == "user":
+            return HumanMessage(content=content)
+        elif role == "system":
+            return SystemMessage(content=content)
+        else:
+            return AIMessage(content=content)
 
     def _extract_content(self, message) -> str:
-        """从消息中提取内容，过滤 thinking 标签"""
         content = getattr(message, "content", "")
 
-        # 处理列表格式的内容
         if isinstance(content, list):
             text_parts = [
                 block.get("text", "")
@@ -250,50 +139,102 @@ class CapricornGraph:
             ]
             content = "\n".join(text_parts) if text_parts else str(content)
 
-        # 过滤掉 <thinking>...</thinking> 标签
-        import re
-        content = re.sub(r'<thinking>.*?</thinking>\s*', '', content, flags=re.DOTALL)
-
-        return content.strip()
+        content = strip_thinking_tags(content)
+        return content
 
     def _build_system_prompt(self) -> str:
-        """构建系统提示"""
-        parts = ["# Capricorn Agent\n\nYou are a helpful AI assistant."]
+        parts = []
 
-        # 添加工作区信息
-        parts.append(f"""# Workspace
+        # ── 身份与核心行为 ──
+        parts.append("""# Capricorn Agent
 
-All files and resources are located in the workspace directory.
-When working with files, always use paths relative to the workspace or absolute paths.""")
+You are Capricorn, an intelligent AI assistant. You are helpful, knowledgeable, and direct.
 
-        # 添加长期记忆
+## Core Rules
+
+1. **Tool-use enforcement**: You MUST use your tools to take action — do not describe
+   what you would do without actually doing it. When you say you will perform an action,
+   you MUST immediately make the corresponding tool call in the same response.
+   Never end your turn with a promise of future action — execute it now.
+
+2. **Direct answers**: Answer user questions directly. Do not prefix with unnecessary
+   explanations about what you are going to do. Just do it.
+
+3. **Error recovery**: If a tool call fails, analyze the error and try a different
+   approach. Do not repeat the exact same failed call.
+
+4. **Conciseness**: Be concise in your responses. Provide the information the user
+   asked for without unnecessary elaboration.""")
+
+        # ── 工作区信息 ──
+        workspace_root = getattr(
+            getattr(self.session_manager, "workspace", None), "root", "./workspace"
+        )
+        if self.sandbox:
+            parts.append(f"""# Workspace (Sandbox Mode)
+
+Your workspace is at `{workspace_root}`. Sandbox mode is enabled.
+
+Rules:
+- All file operations are restricted to the workspace directory.
+- Paths outside the workspace will be rejected. Use relative paths or paths starting with `{workspace_root}`.
+- Use `list_files` to explore the workspace structure before working with files.""")
+        else:
+            parts.append(f"""# Workspace
+
+Your workspace is at `{workspace_root}`. This is your working directory for all file operations.
+
+Rules:
+- You have access to the full filesystem. Use this power responsibly.
+- When writing code, creating documents, or saving any output, prefer writing to the workspace.
+- Use `list_files` to explore directories before working with files.
+- All paths passed to tools should be relative to the workspace root or absolute paths starting with `{workspace_root}`.""")
+
+        # ── 长期记忆 ──
         memory_content = self.long_term_memory.read()
         if memory_content:
-            parts.append(f"""# Long-term Memory (MEMORY.md)
+            parts.append(f"""# Long-term Memory
 
 This contains important facts, preferences, and context that should always be remembered.
 
 {memory_content}""")
 
-        # 添加工具信息（按层级分组）
+        # ── 历史摘要 ──
+        history_lines = self.history_log.read(limit=10)
+        if history_lines:
+            parts.append(
+                "# Recent History\n\nSummaries of recent conversations:\n\n"
+                + "\n".join(f"- {line}" for line in history_lines)
+            )
+
+        # ── 工具信息（含描述和使用指导）──
         tool_registry = self.capability_registry.tools
-        if hasattr(tool_registry, 'list_by_layer'):
+        if hasattr(tool_registry, "list_by_layer"):
             layers = tool_registry.list_by_layer()
             if any(layers.values()):
                 layer_sections = []
                 for layer_name, tools in layers.items():
-                    if tools:
-                        layer_desc = {
-                            "builtin": "**builtin** - Built-in atomic tools (fast, local operations)",
-                            "mcp": "**mcp** - External MCP tools (network requests, third-party APIs)",
-                            "workflow": "**workflow** - Complex multi-step workflows (slow, significant task completion)",
-                        }.get(layer_name, layer_name)
-                        layer_sections.append(f"{layer_desc}\nAvailable: {', '.join(tools)}")
-                if layer_sections:
-                    parts.append("# Tools (by complexity)\n\n" + "\n\n".join(layer_sections))
+                    if not tools:
+                        continue
+                    layer_desc = {
+                        "builtin": "## Built-in Tools\nFast, local operations. Use these for file system access and command execution.",
+                        "mcp": "## MCP Tools\nExternal API tools. Use these for maps, transportation, and real-time data.",
+                        "workflow": "## Workflow Tools\nComplex multi-step workflows. Use these for tasks that require orchestrating multiple tools.",
+                    }.get(layer_name, f"## {layer_name}")
 
-        # 添加技能信息（渐进式披露）
-        if hasattr(self.skill_manager, 'list_skills') and self.skill_manager.list_skills():
+                    tool_details = []
+                    for tool_name in tools:
+                        tool = tool_registry.get(tool_name)
+                        desc = tool.description[:80] if tool else ""
+                        tool_details.append(f"- **{tool_name}**: {desc}")
+
+                    layer_sections.append(f"{layer_desc}\n\n" + "\n".join(tool_details))
+
+                if layer_sections:
+                    parts.append("# Available Tools\n\n" + "\n\n".join(layer_sections))
+
+        # ── 技能信息 ──
+        if hasattr(self.skill_manager, "list_skills") and self.skill_manager.list_skills():
             always_skills = self.skill_manager.get_always_skills()
             if always_skills:
                 always_parts = []
@@ -302,10 +243,13 @@ This contains important facts, preferences, and context that should always be re
                     if content:
                         always_parts.append(f"## {skill_name}\n\n{content}")
                 if always_parts:
-                    parts.append("# Active Skills (always on)\n\n" + "\n\n---\n\n".join(always_parts))
+                    parts.append("# Active Skills\n\n" + "\n\n---\n\n".join(always_parts))
 
             on_demand_summary = self.skill_manager.get_skill_summary(include_always=False)
             if on_demand_summary and "no skills loaded" not in on_demand_summary:
-                parts.append(f"# Available Skills (on-demand)\n\n{on_demand_summary}")
+                parts.append(f"# Available Skills\n\n{on_demand_summary}")
+
+        # ── 当前时间 ──
+        parts.append(f"# Current Time\n\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
         return "\n\n---\n\n".join(parts)

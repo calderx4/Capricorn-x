@@ -8,7 +8,6 @@ Session Manager - 会话管理
 """
 
 import json
-import re
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
@@ -19,6 +18,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.settings import WorkspaceConfig
+from core.utils import strip_thinking_tags
 
 
 @dataclass
@@ -131,8 +131,8 @@ class SessionManager:
                 for msg in session.messages:
                     content = msg.get("content", "")
                     if content:
-                        content = re.sub(r'<thinking>.*?</thinking>\s*', '', content, flags=re.DOTALL)
-                        msg = {**msg, "content": content.strip()}
+                        content = strip_thinking_tags(content)
+                        msg = {**msg, "content": content}
                     if msg.get("content"):
                         f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 

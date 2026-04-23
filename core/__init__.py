@@ -13,6 +13,7 @@ from .interfaces import (
     IMemoryStore,
 )
 from .token_counter import TokenCounter
+from .utils import strip_thinking_tags
 
 __all__ = [
     "BaseTool",
@@ -22,4 +23,5 @@ __all__ = [
     "ISkillManager",
     "IMemoryStore",
     "TokenCounter",
+    "strip_thinking_tags",
 ]

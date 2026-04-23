@@ -25,8 +25,10 @@ class CapabilityRegistry:
         self._mcp_manager = None
 
     @classmethod
-    async def create(cls, mcp_servers: Dict[str, Any] = None) -> "CapabilityRegistry":
+    async def create(cls, mcp_servers: Dict[str, Any] = None, workspace_root: str = "./workspace", sandbox: bool = True) -> "CapabilityRegistry":
         registry = cls()
+        registry._workspace_root = workspace_root
+        registry._sandbox = sandbox
 
         # 注册内置工具（第 1 层：原子执行）
         await registry._register_builtin_tools()
@@ -47,7 +49,7 @@ class CapabilityRegistry:
         )
         from capabilities.tools.builtin.extensions.exec_tools import ExecTool
 
-        for tool in [ReadFileTool(), WriteFileTool(), ListFilesTool(), ExecTool()]:
+        for tool in [ReadFileTool(self._workspace_root, self._sandbox), WriteFileTool(self._workspace_root, self._sandbox), ListFilesTool(self._workspace_root, self._sandbox), ExecTool()]:
             self.tools.register(tool, layer="builtin")
 
     async def _register_mcp_tools(self, mcp_servers: Dict[str, Any]):

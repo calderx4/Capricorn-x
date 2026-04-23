@@ -7,7 +7,7 @@ from config.settings import (
     WorkspaceConfig,
     LLMConfig,
     MCPServerConfig,
-    HooksConfig,
+    MemoryConfig,
 )
 
 

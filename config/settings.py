@@ -20,6 +20,7 @@ class WorkspaceConfig(BaseModel):
     root: str = "./workspace"
     memory_dir: str = "memory"
     session_dir: str = "sessions"
+    sandbox: bool = True  # True = 文件操作限制在 workspace 内；False = 允许访问任意路径
 
     def get_memory_path(self, filename: str) -> Path:
         """
@@ -71,17 +72,14 @@ class MCPServerConfig(BaseModel):
     tool_timeout: int = Field(default=30, gt=0)
 
 
-class HooksConfig(BaseModel):
-    """Hook 配置"""
+class MemoryConfig(BaseModel):
+    """记忆整合配置"""
 
-    memory_consolidation: Dict[str, Any] = Field(
-        default_factory=lambda: {
-            "enabled": True,
-            "message_threshold": 20,
-            "messages_to_keep": 10,
-            "token_threshold": 8000,
-        }
-    )
+    enabled: bool = True
+    message_threshold: int = Field(default=20, gt=0)
+    messages_to_keep: int = Field(default=10, gt=0)
+    token_threshold: int = Field(default=8000, gt=0)
+    context_budget: int = Field(default=16000, gt=0)
 
 
 class Config(BaseModel):
@@ -90,7 +88,7 @@ class Config(BaseModel):
     workspace: WorkspaceConfig
     llm: LLMConfig
     mcp_servers: Dict[str, MCPServerConfig] = Field(default_factory=dict)
-    hooks: HooksConfig = Field(default_factory=HooksConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     skills: Dict[str, Any] = Field(default_factory=dict)
     agent: Dict[str, Any] = Field(default_factory=dict)
 
@@ -130,39 +128,16 @@ class Config(BaseModel):
         支持格式：
         - ${ENV_VAR_NAME} - 完整替换
         - "prefix ${ENV_VAR} suffix" - 字符串中嵌入
-
-        Args:
-            data: 待处理的数据
-
-        Returns:
-            解析后的数据
         """
         if isinstance(data, str):
-            # 完整匹配 ${VAR}
-            if data.startswith("${") and data.endswith("}"):
-                var_name = data[2:-1]
-                resolved = os.getenv(var_name, data)
-                if resolved != data:
-                    import loguru
-                    loguru.logger.debug(f"Resolved env var ${{{var_name}}} -> {resolved[:20]}...")
-                return resolved
-
-            # 字符串中包含 ${VAR}
-            if "${" in data and "}" in data:
-                import re
-                pattern = r'\$\{([^}]+)\}'
-
-                def replace_env_var(match):
-                    var_name = match.group(1)
-                    value = os.getenv(var_name, match.group(0))
-                    if value != match.group(0):
-                        import loguru
-                        loguru.logger.debug(f"Resolved env var ${{{var_name}}} in string")
-                    return value
-
-                return re.sub(pattern, replace_env_var, data)
-
-            return data
+            if "${" not in data:
+                return data
+            import re
+            return re.sub(
+                r'\$\{([^}]+)\}',
+                lambda m: os.getenv(m.group(1), m.group(0)),
+                data,
+            )
 
         if isinstance(data, dict):
             return {k: Config._resolve_env_vars(v) for k, v in data.items()}

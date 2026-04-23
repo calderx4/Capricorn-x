@@ -2,6 +2,7 @@
 File Tools - 文件操作工具
 
 提供基本的文件读写功能。
+sandbox=True 时限制路径在 workspace 内，sandbox=False 时允许访问任意路径。
 """
 
 from pathlib import Path
@@ -15,8 +16,27 @@ sys.path.insert(0, str(PathLib(__file__).parent.parent.parent.parent))
 from core.base_tool import BaseTool
 
 
+def _resolve_path(path: str, workspace_root: str, sandbox: bool) -> Path:
+    """解析路径，sandbox 模式下验证在 workspace 内"""
+    p = Path(path)
+    if not p.is_absolute():
+        p = Path(workspace_root) / p
+    p = p.resolve()
+
+    if sandbox:
+        root = Path(workspace_root).resolve()
+        if not str(p).startswith(str(root)):
+            raise ValueError(f"Path '{path}' is outside workspace (sandbox mode enabled)")
+
+    return p
+
+
 class ReadFileTool(BaseTool):
     """读取文件工具"""
+
+    def __init__(self, workspace_root: str = "./workspace", sandbox: bool = True):
+        self._workspace_root = workspace_root
+        self._sandbox = sandbox
 
     @property
     def name(self) -> str:
@@ -24,7 +44,11 @@ class ReadFileTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Read the contents of a file from the local filesystem."
+        return (
+            "Read the contents of a file from the local filesystem. "
+            "Use this when you need to inspect file contents, check configurations, "
+            "or read user-provided data. Returns the full text content of the file."
+        )
 
     @property
     def parameters(self) -> Dict[str, Any]:
@@ -40,17 +64,8 @@ class ReadFileTool(BaseTool):
         }
 
     async def execute(self, path: str) -> str:
-        """
-        读取文件内容
-
-        Args:
-            path: 文件路径
-
-        Returns:
-            文件内容
-        """
         try:
-            file_path = Path(path)
+            file_path = _resolve_path(path, self._workspace_root, self._sandbox)
 
             if not file_path.exists():
                 return f"Error: File not found: {path}"
@@ -62,6 +77,8 @@ class ReadFileTool(BaseTool):
             logger.debug(f"Read file: {path} ({len(content)} chars)")
             return content
 
+        except ValueError as e:
+            return f"Error: {e}"
         except Exception as e:
             logger.error(f"Failed to read file '{path}': {e}")
             return f"Error: Failed to read file: {str(e)}"
@@ -70,13 +87,22 @@ class ReadFileTool(BaseTool):
 class WriteFileTool(BaseTool):
     """写入文件工具"""
 
+    def __init__(self, workspace_root: str = "./workspace", sandbox: bool = True):
+        self._workspace_root = workspace_root
+        self._sandbox = sandbox
+
     @property
     def name(self) -> str:
         return "write_file"
 
     @property
     def description(self) -> str:
-        return "Write content to a file on the local filesystem."
+        return (
+            "Write content to a file on the local filesystem. "
+            "Creates parent directories automatically if they don't exist. "
+            "Overwrites existing files. Use this to save results, create documents, "
+            "or write generated content."
+        )
 
     @property
     def parameters(self) -> Dict[str, Any]:
@@ -96,28 +122,17 @@ class WriteFileTool(BaseTool):
         }
 
     async def execute(self, path: str, content: str) -> str:
-        """
-        写入文件内容
-
-        Args:
-            path: 文件路径
-            content: 文件内容
-
-        Returns:
-            成功或错误消息
-        """
         try:
-            file_path = Path(path)
+            file_path = _resolve_path(path, self._workspace_root, self._sandbox)
 
-            # 创建父目录
             file_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # 写入文件
             file_path.write_text(content, encoding="utf-8")
             logger.debug(f"Wrote file: {path} ({len(content)} chars)")
 
             return f"Successfully wrote to {path}"
 
+        except ValueError as e:
+            return f"Error: {e}"
         except Exception as e:
             logger.error(f"Failed to write file '{path}': {e}")
             return f"Error: Failed to write file: {str(e)}"
@@ -126,13 +141,21 @@ class WriteFileTool(BaseTool):
 class ListFilesTool(BaseTool):
     """列出文件工具"""
 
+    def __init__(self, workspace_root: str = "./workspace", sandbox: bool = True):
+        self._workspace_root = workspace_root
+        self._sandbox = sandbox
+
     @property
     def name(self) -> str:
         return "list_files"
 
     @property
     def description(self) -> str:
-        return "List files in a directory."
+        return (
+            "List files and subdirectories in a directory. "
+            "Use this to explore the workspace structure, find files, "
+            "or check what resources are available before reading."
+        )
 
     @property
     def parameters(self) -> Dict[str, Any]:
@@ -148,17 +171,8 @@ class ListFilesTool(BaseTool):
         }
 
     async def execute(self, path: str) -> str:
-        """
-        列出目录中的文件
-
-        Args:
-            path: 目录路径
-
-        Returns:
-            文件列表
-        """
         try:
-            dir_path = Path(path)
+            dir_path = _resolve_path(path, self._workspace_root, self._sandbox)
 
             if not dir_path.exists():
                 return f"Error: Directory not found: {path}"
@@ -180,6 +194,8 @@ class ListFilesTool(BaseTool):
             logger.debug(f"Listed {len(files)} items in {path}")
             return result
 
+        except ValueError as e:
+            return f"Error: {e}"
         except Exception as e:
             logger.error(f"Failed to list directory '{path}': {e}")
             return f"Error: Failed to list directory: {str(e)}"
