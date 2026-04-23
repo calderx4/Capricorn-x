@@ -25,7 +25,13 @@ class ExecTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Execute a shell command on the system."
+        return (
+            "Execute a shell command on the system. "
+            "Returns stdout, stderr, and exit code. "
+            "Supports an optional working directory (cwd) and timeout in seconds. "
+            "Use this for running scripts, installing packages, git operations, "
+            "or any system-level tasks that require shell access."
+        )
 
     @property
     def parameters(self) -> Dict[str, Any]:

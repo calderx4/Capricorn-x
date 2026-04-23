@@ -43,14 +43,5 @@ class WorkflowToolWrapper(BaseTool):
         return await self._workflow.execute(tools=self._tool_registry, **kwargs)
 
     def _build_parameters(self, workflow: BaseWorkflow) -> Dict[str, Any]:
-        """构建参数 schema"""
-        return {
-            "type": "object",
-            "properties": {
-                "task": {
-                    "type": "string",
-                    "description": f"Task description for the {workflow.name} workflow"
-                }
-            },
-            "required": ["task"]
-        }
+        """使用工作流自定义的参数 schema"""
+        return workflow.parameters_schema

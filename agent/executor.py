@@ -9,7 +9,6 @@ Executor - Agent 执行器
 
 import asyncio
 import json
-import re
 from typing import Optional
 from loguru import logger
 
@@ -25,6 +24,7 @@ from memory.session import SessionManager
 from memory.long_term import LongTermMemory
 from memory.history import HistoryLog
 from capabilities.tools.workflow.extensions.memory_consolidation_workflow import MemoryConsolidationWorkflow
+from core.utils import strip_thinking_tags
 
 
 class CapricornAgent:
@@ -73,7 +73,9 @@ class CapricornAgent:
 
         # 2. 初始化能力注册中心
         self.capability_registry = await CapabilityRegistry.create(
-            self.config.mcp_servers
+            self.config.mcp_servers,
+            workspace_root=self.config.workspace.root,
+            sandbox=self.config.workspace.sandbox,
         )
 
         # 3. 初始化技能管理器
@@ -98,7 +100,8 @@ class CapricornAgent:
             self.session_manager,
             self.long_term_memory,
             self.history_log,
-            self.llm_client
+            self.llm_client,
+            sandbox=self.config.workspace.sandbox,
         )
 
         logger.info("✓ Capricorn Agent initialized")
@@ -161,54 +164,52 @@ class CapricornAgent:
         return response
 
     async def _check_and_consolidate_memory(self, thread_id: str):
-        """
-        对话开始前检查：是否需要整合记忆。
-        如果触发阈值，在进入 ReAct 循环前同步执行整合。
-        """
+        """对话前检查：是否需要整合记忆。两种触发：条数或 token 数超阈值。"""
         try:
-            hooks_cfg = self.config.hooks.memory_consolidation
-            if not hooks_cfg.get("enabled", True):
+            mem_cfg = self.config.memory
+            if not mem_cfg.enabled:
                 return
 
-            threshold = hooks_cfg.get("message_threshold", 20)
-            keep = hooks_cfg.get("messages_to_keep", 10)
+            # 直接用内存中的 session，不重读文件
+            session = self.session_manager.get_session(thread_id)
+            messages = session.get_history(max_messages=0)
 
-            # 读取 session 文件判断消息数
-            session_path = self.session_manager.get_session_path(thread_id)
-            if not session_path.exists():
+            if not messages:
                 return
 
-            messages = []
-            with open(session_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                        if data.get("content"):
-                            messages.append(data)
-                    except json.JSONDecodeError:
-                        continue
-
+            # 触发条件 1：消息条数超阈值
             total = len(messages)
-            logger.debug(f"Session check: {total} messages (threshold={threshold})")
+            triggered_by = None
+            if total > mem_cfg.message_threshold:
+                triggered_by = f"messages({total} > {mem_cfg.message_threshold})"
 
-            if total <= threshold:
+            # 触发条件 2：总 token 数超阈值（仅条数未触发时才算）
+            if not triggered_by:
+                # 快速估算：中文 ~1.5 字符/token，英文 ~4 字符/token
+                total_chars = sum(len(m.get("content", "")) for m in messages)
+                est_tokens = total_chars // 2 if total_chars > 0 else 0
+                if est_tokens > mem_cfg.token_threshold:
+                    triggered_by = f"tokens(~{est_tokens} > {mem_cfg.token_threshold})"
+
+            if not triggered_by:
                 return
 
-            logger.info(f"Memory consolidation triggered: {total} > {threshold}")
+            logger.info(f"Memory consolidation triggered by {triggered_by}")
 
-            # 同步执行整合
             workflow = MemoryConsolidationWorkflow(
                 long_term_memory=self.long_term_memory,
                 history_log=self.history_log,
                 llm_client=self.llm_client,
-                config={"max_messages": threshold, "messages_to_keep": keep}
+                config={
+                    "max_messages": mem_cfg.message_threshold,
+                    "messages_to_keep": mem_cfg.messages_to_keep,
+                    "max_tokens": mem_cfg.token_threshold,
+                    "context_budget": mem_cfg.context_budget,
+                }
             )
 
             session_data = {"messages": messages}
-            logger.info(f"Consolidating {len(messages)} messages, keep={keep}")
+            logger.info(f"Consolidating {len(messages)} messages, keep={mem_cfg.messages_to_keep}")
             success = await workflow.execute(session_data=session_data)
             logger.info(f"Consolidation result: {success}, consecutive_failures={workflow._consecutive_failures}")
 
@@ -217,23 +218,20 @@ class CapricornAgent:
                 num_remove = len(to_consolidate)
                 remaining = messages[num_remove:]
 
-                # 重写 session，只保留 keep 条
+                # 重写 session 文件，只保留裁剪后的消息
+                session_path = self.session_manager.get_session_path(thread_id)
                 with open(session_path, "w", encoding="utf-8") as f:
                     for msg in remaining:
                         content = msg.get("content", "")
                         if content:
-                            content = re.sub(
-                                r'<thinking>.*?</thinking>\s*',
-                                '', content, flags=re.DOTALL
-                            ).strip()
+                            content = strip_thinking_tags(content)
                             msg = {**msg, "content": content}
                         if msg.get("content"):
                             f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
-                # 清除内存缓存（但不删除文件），下次 get_session 会重新从文件加载
                 self.session_manager._sessions.pop(thread_id, None)
 
-                logger.info(f"✓ Consolidated {num_remove} messages, kept {len(remaining)}")
+                logger.info(f"Consolidated {num_remove} messages, kept {len(remaining)}")
             else:
                 logger.warning("Memory consolidation failed")
 
