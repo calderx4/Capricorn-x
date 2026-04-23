@@ -31,7 +31,10 @@ class MCPToolWrapper(BaseTool):
         self._session = session
         self._original_name = tool_def.name
         self._name = f"mcp_{server_name}_{tool_def.name}"
-        self._description = tool_def.description or tool_def.name
+        self._description = (
+            tool_def.description
+            or f"MCP tool: {tool_def.name} from {server_name} server"
+        )
         raw_schema = tool_def.inputSchema or {"type": "object", "properties": {}}
         self._parameters = self._normalize_schema(raw_schema)
         self._tool_timeout = tool_timeout

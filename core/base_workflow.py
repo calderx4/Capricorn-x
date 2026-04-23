@@ -46,6 +46,20 @@ class BaseWorkflow(ABC):
         """
         pass
 
+    @property
+    def parameters_schema(self) -> Dict[str, Any]:
+        """工作流参数 schema，子类可覆写以自定义参数格式"""
+        return {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": f"Task description for the {self.name} workflow",
+                }
+            },
+            "required": ["task"],
+        }
+
     @abstractmethod
     async def execute(self, tools: Any, **kwargs: Any) -> Any:
         """
