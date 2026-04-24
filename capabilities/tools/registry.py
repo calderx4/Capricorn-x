@@ -46,6 +46,7 @@ class ToolRegistry:
     def unregister(self, name: str) -> None:
         """注销工具"""
         self._tools.pop(name, None)
+        self._layers.pop(name, None)
 
     def get(self, name: str) -> Optional[BaseTool]:
         """获取工具"""

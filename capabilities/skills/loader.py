@@ -51,8 +51,7 @@ class SkillLoader:
                     return {
                         "name": frontmatter.get("name"),
                         "description": frontmatter.get("description", ""),
-                        "capabilities": frontmatter.get("capabilities", []),
-                        "always": frontmatter.get("always", False),
+                        "available": frontmatter.get("available", False),
                         "content": body,
                         "path": str(skill_path)
                     }
@@ -63,36 +62,16 @@ class SkillLoader:
         return {
             "name": skill_path.parent.name,
             "description": "",
-            "capabilities": [],
-            "always": False,
+            "available": False,
             "content": content,
             "path": str(skill_path)
         }
 
     @staticmethod
     def get_summary(skill_data: Dict[str, Any]) -> str:
-        """
-        获取技能摘要（XML 格式）
-
-        Args:
-            skill_data: 技能数据
-
-        Returns:
-            XML 格式的技能摘要
-        """
         name = skill_data.get("name", "unknown")
         description = skill_data.get("description", "")
-        capabilities = skill_data.get("capabilities", [])
-        always = skill_data.get("always", False)
-
-        caps_xml = "\n".join(f"    <capability>{cap}</capability>" for cap in capabilities)
-
-        return f"""<skill name="{name}" always="{always}">
-  <description>{description}</description>
-  <capabilities>
-{caps_xml}
-  </capabilities>
-</skill>"""
+        return f'<skill name="{name}">\n  <description>{description}</description>\n</skill>'
 
     @staticmethod
     def find_skill_file(skill_dir: Path) -> Optional[Path]:

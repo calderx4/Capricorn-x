@@ -70,23 +70,22 @@ class MCPToolWrapper(BaseTool):
         """
         规范化 JSON Schema
 
-        确保Schema 符合标准格式。
+        确保 Schema 符合标准格式。
 
         Args:
             schema: 原始 Schema
 
         Returns:
-            规范化后的 Schema
+            规范化后的 Schema（拷贝，不修改原字典）
         """
-        # 确保 type 字段存在
+        schema = dict(schema)
+
         if "type" not in schema:
             schema["type"] = "object"
 
-        # 确保 properties 字段存在（对于 object 类型）
         if schema.get("type") == "object" and "properties" not in schema:
             schema["properties"] = {}
 
-        # 确保 required 字段是列表
         if "required" in schema and not isinstance(schema["required"], list):
             schema["required"] = []
 

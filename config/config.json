@@ -27,23 +27,17 @@
       "enabled_tools": ["*"],
       "tool_timeout": 30
     },
-    "filesystem": {
+    "minimax": {
       "type": "stdio",
-      "command": "mcp-server-filesystem",
-      "args": ["--root", "/path/to/root"],
-      "env": {},
-      "enabled": false,
-      "enabled_tools": ["*"],
-      "tool_timeout": 30
-    },
-    "web_search": {
-      "type": "sse",
-      "url": "http://localhost:8080/sse",
-      "headers": {
-        "Authorization": "Bearer ${MCP_API_KEY}"
+      "command": "uvx",
+      "args": ["minimax-coding-plan-mcp"],
+      "env": {
+        "MINIMAX_API_KEY": "${MINIMAX_API_KEY}",
+        "MINIMAX_MCP_BASE_PATH": "./workspace",
+        "MINIMAX_API_HOST": "https://api.minimaxi.com"
       },
-      "enabled": false,
-      "enabled_tools": ["search", "fetch"],
+      "enabled": true,
+      "enabled_tools": ["*"],
       "tool_timeout": 60
     }
   },

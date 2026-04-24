@@ -1,6 +1,6 @@
 [project]
 name = "capricorn"
-version = "0.2.0"
+version = "0.2.1"
 description = "原生 Function Calling 驱动的可扩展 LLM Agent 系统"
 readme = "README.md"
 license = {text = "MIT"}

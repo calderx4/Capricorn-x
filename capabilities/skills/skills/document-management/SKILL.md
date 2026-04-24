@@ -1,11 +1,7 @@
 ---
-name: document_management
+name: document-management
 description: 文档管理技能 - 创建、编辑和管理结构化文档
-capabilities:
-  - create_document
-  - read_file
-  - write_file
-always: false
+available: true
 ---
 
 # 文档管理技能

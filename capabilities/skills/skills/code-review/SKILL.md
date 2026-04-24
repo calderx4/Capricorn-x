@@ -1,10 +1,7 @@
 ---
-name: code_review
+name: code-review
 description: 代码审查技能 - 审查代码质量、安全性和最佳实践，提供建设性反馈
-capabilities:
-  - read_file
-  - write_file
-always: false
+available: true
 ---
 
 # 代码审查技能

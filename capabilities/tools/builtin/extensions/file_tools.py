@@ -25,7 +25,9 @@ def _resolve_path(path: str, workspace_root: str, sandbox: bool) -> Path:
 
     if sandbox:
         root = Path(workspace_root).resolve()
-        if not str(p).startswith(str(root)):
+        try:
+            p.relative_to(root)
+        except ValueError:
             raise ValueError(f"Path '{path}' is outside workspace (sandbox mode enabled)")
 
     return p
@@ -37,6 +39,10 @@ class ReadFileTool(BaseTool):
     def __init__(self, workspace_root: str = "./workspace", sandbox: bool = True):
         self._workspace_root = workspace_root
         self._sandbox = sandbox
+
+    @classmethod
+    def from_config(cls, config: dict) -> "ReadFileTool":
+        return cls(config["workspace_root"], config.get("sandbox", True))
 
     @property
     def name(self) -> str:
@@ -91,6 +97,10 @@ class WriteFileTool(BaseTool):
         self._workspace_root = workspace_root
         self._sandbox = sandbox
 
+    @classmethod
+    def from_config(cls, config: dict) -> "WriteFileTool":
+        return cls(config["workspace_root"], config.get("sandbox", True))
+
     @property
     def name(self) -> str:
         return "write_file"
@@ -144,6 +154,10 @@ class ListFilesTool(BaseTool):
     def __init__(self, workspace_root: str = "./workspace", sandbox: bool = True):
         self._workspace_root = workspace_root
         self._sandbox = sandbox
+
+    @classmethod
+    def from_config(cls, config: dict) -> "ListFilesTool":
+        return cls(config["workspace_root"], config.get("sandbox", True))
 
     @property
     def name(self) -> str:

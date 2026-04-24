@@ -71,16 +71,17 @@ class CapricornAgent:
         # 1. 初始化 LLM 客户端
         self._init_llm_client()
 
-        # 2. 初始化能力注册中心
+        # 2. 初始化技能管理器
+        skills_dir = self.config.skills.get("skills_dir", "capabilities/skills/skills")
+        self.skill_manager = SkillManager(skills_dir)
+
+        # 3. 初始化能力注册中心（传入 skill_manager 以注册 skill_view 工具）
         self.capability_registry = await CapabilityRegistry.create(
             self.config.mcp_servers,
             workspace_root=self.config.workspace.root,
             sandbox=self.config.workspace.sandbox,
+            skill_manager=self.skill_manager,
         )
-
-        # 3. 初始化技能管理器
-        skills_dir = self.config.skills.get("skills_dir", "capabilities/skills/skills")
-        self.skill_manager = SkillManager(skills_dir)
 
         # 4. 初始化会话管理器
         self.session_manager = SessionManager(
@@ -236,9 +237,7 @@ class CapricornAgent:
                 logger.warning("Memory consolidation failed")
 
         except Exception as e:
-            logger.error(f"Memory consolidation error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"Memory consolidation error: {e}")
 
     async def cleanup(self):
         """清理资源"""

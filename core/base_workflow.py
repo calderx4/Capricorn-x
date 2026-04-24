@@ -13,6 +13,13 @@ from typing import Any, Dict, List
 class BaseWorkflow(ABC):
     """工作流抽象基类"""
 
+    auto_discover = True
+
+    @classmethod
+    def from_config(cls, config: dict) -> "BaseWorkflow":
+        """从配置创建实例，需要外部依赖的子类覆写此方法"""
+        return cls()
+
     @property
     @abstractmethod
     def name(self) -> str:
