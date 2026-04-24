@@ -96,41 +96,36 @@ class SkillManager:
 
         return skill_data.get("content", "")
 
-    def get_skill_summary(self, include_always: bool = True) -> str:
+    def get_available_skills(self) -> Dict[str, Dict[str, Any]]:
         """
-        获取技能摘要（XML 格式）
+        获取所有 available=true 的技能（即告诉模型可用的技能）
 
-        Args:
-            include_always: 是否只包含 always=true 的技能
+        Returns:
+            可用技能字典 {name: skill_data}
+        """
+        return {
+            name: data for name, data in self._skills.items()
+            if data.get("available", False)
+        }
+
+    def get_skill_summary(self) -> str:
+        """
+        获取所有可用技能的摘要（XML 格式）
 
         Returns:
             XML 格式的技能摘要
         """
+        available = self.get_available_skills()
+
+        if not available:
+            return ""
+
         summaries = []
-
-        for skill_name, skill_data in self._skills.items():
-            if include_always and not skill_data.get("always", False):
-                continue
-
+        for skill_name, skill_data in available.items():
             summary = SkillLoader.get_summary(skill_data)
             summaries.append(summary)
 
-        if not summaries:
-            return "<skills>\n  (no skills loaded)\n</skills>"
-
         return "<skills>\n" + "\n".join(summaries) + "\n</skills>"
-
-    def get_always_skills(self) -> List[str]:
-        """
-        获取所有 always=true 的技能名称
-
-        Returns:
-            技能名称列表
-        """
-        return [
-            name for name, data in self._skills.items()
-            if data.get("always", False)
-        ]
 
     def has(self, name: str) -> bool:
         """检查技能是否存在"""

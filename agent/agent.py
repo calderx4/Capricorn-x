@@ -62,7 +62,6 @@ class CapricornGraph:
         logger.info(f"Running agent with thread_id: {thread_id}")
 
         session = self.session_manager.get_session(thread_id)
-        session.add_message("user", user_input)
 
         system_prompt = self._build_system_prompt()
         history_messages = session.get_history(max_messages=0)
@@ -72,6 +71,8 @@ class CapricornGraph:
             *[self._dict_to_message(msg) for msg in history_messages],
             HumanMessage(content=user_input),
         ]
+
+        session.add_message("user", user_input)
 
         if not self._llm_with_tools:
             return "LLM 客户端未初始化"
@@ -235,19 +236,13 @@ This contains important facts, preferences, and context that should always be re
 
         # ── 技能信息 ──
         if hasattr(self.skill_manager, "list_skills") and self.skill_manager.list_skills():
-            always_skills = self.skill_manager.get_always_skills()
-            if always_skills:
-                always_parts = []
-                for skill_name in always_skills:
-                    content = self.skill_manager.load_skill(skill_name)
-                    if content:
-                        always_parts.append(f"## {skill_name}\n\n{content}")
-                if always_parts:
-                    parts.append("# Active Skills\n\n" + "\n\n---\n\n".join(always_parts))
+            skill_summary = self.skill_manager.get_skill_summary()
+            if skill_summary:
+                parts.append(f"""# Available Skills
 
-            on_demand_summary = self.skill_manager.get_skill_summary(include_always=False)
-            if on_demand_summary and "no skills loaded" not in on_demand_summary:
-                parts.append(f"# Available Skills\n\n{on_demand_summary}")
+You have access to the following skills. When a user's request matches a skill, you MUST call `skill_view(name)` to load its full instructions before proceeding. Do not attempt to use a skill without loading it first.
+
+{skill_summary}""")
 
         # ── 当前时间 ──
         parts.append(f"# Current Time\n\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

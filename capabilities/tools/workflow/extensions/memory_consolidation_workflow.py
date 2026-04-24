@@ -30,6 +30,8 @@ from memory.history import HistoryLog
 class MemoryConsolidationWorkflow(BaseWorkflow):
     """记忆整合 Workflow"""
 
+    auto_discover = False  # 依赖复杂，不走自动发现
+
     @property
     def name(self) -> str:
         return "memory_consolidation"

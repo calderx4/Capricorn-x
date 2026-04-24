@@ -26,12 +26,12 @@
 ## 特性
 
 - **原生 FC 循环** — 直接使用 LLM function calling，工具并发执行（asyncio.gather），迭代上限保护
-- **三层能力** — 内置工具 / MCP 协议 / 工作流，统一注册、分层管理
+- **三层能力** — 内置工具 / MCP 协议 / 工作流，统一注册、分层管理，目录扫描自动发现
 - **MCP 集成** — 支持 stdio、SSE、streamable_http 三种传输方式，工具自动发现并命名空间隔离（`mcp_{server}_{tool}`）
 - **多 LLM 提供商** — Anthropic Claude、OpenAI 兼容 API（MiniMax 等），配置切换即可
 - **记忆系统** — 会话持久化（JSONL）、长期记忆（MEMORY.md）、历史日志（HISTORY.md）
 - **自动记忆整合** — 对话超过阈值时自动调用 LLM 整合记忆，含失败熔断机制（连续失败 3 次后回退为原始归档）
-- **技能系统** — SKILL.md 定义，支持常驻注入（always）和按需加载两种模式
+- **技能系统** — SKILL.md 定义，渐进式披露：system prompt 列出可用技能摘要，LLM 通过 `skill_view` tool 按需加载完整指令
 
 ## 核心：FC 循环
 
@@ -48,11 +48,11 @@
 
 | 层级 | 说明 | 当前工具 |
 |------|------|----------|
-| **Layer 1 内置工具** | 原子操作，本地执行 | read_file、write_file、list_files、exec |
-| **Layer 2 MCP 工具** | 通过 MCP 协议连接外部服务 | 高德地图、文件系统、Web 搜索（可扩展） |
+| **Layer 1 内置工具** | 原子操作，本地执行 | read_file、write_file、list_files、exec、skill_view |
+| **Layer 2 MCP 工具** | 通过 MCP 协议连接外部服务 | MiniMax MCP、高德地图（可扩展） |
 | **Layer 3 工作流** | 多步骤编排 | 文档创建、自检、记忆整合 |
 
-所有工具统一注册到 `ToolRegistry`，通过 `BaseTool` 基类标准化（JSON Schema 参数定义、LangChain 工具桥接）。MCP 工具和 Workflow 通过适配器模式接入。
+所有工具统一注册到 `ToolRegistry`，通过 `BaseTool` 基类标准化（JSON Schema 参数定义、LangChain 工具桥接）。Builtin 工具和 Workflow 放入 `extensions/` 目录自动发现注册，MCP 工具通过配置加载，技能通过 SKILL.md 自动发现。
 
 ## 记忆系统
 
@@ -66,10 +66,23 @@
 
 ## 技能系统
 
-技能以 `SKILL.md` 文件定义，YAML frontmatter 声明名称、描述、所需工具和加载模式：
+技能以 `SKILL.md` 文件定义，YAML frontmatter 声明名称、描述和可用性：
 
-- **always = true** — 每轮注入完整技能内容到 system prompt
-- **always = false** — prompt 中仅展示摘要，按需加载完整内容
+```yaml
+---
+name: code-review
+description: 代码审查技能
+available: true
+---
+```
+
+工作流程采用**渐进式披露**：
+
+1. `available: true` 的技能摘要（name + description）注入 system prompt，LLM 知道有哪些技能可用
+2. 当用户请求匹配某个技能时，LLM 调用 `skill_view(name)` tool 加载完整指令
+3. LLM 按照技能指令执行任务
+
+`available: false` 的技能不会出现在 system prompt 中，LLM 无法感知。
 
 ## 快速开始
 
@@ -135,6 +148,7 @@ capricorn/
 │   ├── skills/             # 技能系统
 │   │   ├── loader.py       # SKILL.md 解析器
 │   │   ├── manager.py      # 技能生命周期管理
+│   │   ├── skill_tool.py   # skill_view tool（LLM 按需加载技能）
 │   │   └── skills/         # 技能定义文件
 │   └── tools/              # 工具系统
 │       ├── registry.py     # 工具注册与并发执行

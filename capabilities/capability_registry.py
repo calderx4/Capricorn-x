@@ -7,7 +7,9 @@ Capability Registry - 能力注册中心
 - 协调执行
 """
 
-from typing import Dict, Any, Optional
+import importlib.util
+import inspect
+from typing import Dict, Any, Generator
 from loguru import logger
 
 import sys
@@ -15,6 +17,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from capabilities.tools.registry import ToolRegistry
+from core.base_tool import BaseTool
+from core.base_workflow import BaseWorkflow
 
 
 class CapabilityRegistry:
@@ -25,10 +29,11 @@ class CapabilityRegistry:
         self._mcp_manager = None
 
     @classmethod
-    async def create(cls, mcp_servers: Dict[str, Any] = None, workspace_root: str = "./workspace", sandbox: bool = True) -> "CapabilityRegistry":
+    async def create(cls, mcp_servers: Dict[str, Any] = None, workspace_root: str = "./workspace", sandbox: bool = True, skill_manager=None) -> "CapabilityRegistry":
         registry = cls()
         registry._workspace_root = workspace_root
         registry._sandbox = sandbox
+        registry._skill_manager = skill_manager
 
         # 注册内置工具（第 1 层：原子执行）
         await registry._register_builtin_tools()
@@ -40,17 +45,46 @@ class CapabilityRegistry:
         # 注册工作流工具（第 3 层：复杂执行）
         await registry._register_workflow_tools()
 
+        # 注册技能工具
+        if skill_manager:
+            await registry._register_skill_tools(skill_manager)
+
         logger.info(f"CapabilityRegistry initialized with {len(registry.tools)} tools")
         return registry
 
-    async def _register_builtin_tools(self):
-        from capabilities.tools.builtin.extensions.file_tools import (
-            ReadFileTool, WriteFileTool, ListFilesTool
-        )
-        from capabilities.tools.builtin.extensions.exec_tools import ExecTool
+    def _discover(self, directory: str, base_class: type, config: dict = None) -> Generator[Any, None, None]:
+        """扫描目录，自动发现并实例化基类子类"""
+        ext_dir = Path(__file__).parent / directory
+        if not ext_dir.exists():
+            return
 
-        for tool in [ReadFileTool(self._workspace_root, self._sandbox), WriteFileTool(self._workspace_root, self._sandbox), ListFilesTool(self._workspace_root, self._sandbox), ExecTool()]:
+        for py_file in sorted(ext_dir.glob("*.py")):
+            if py_file.name.startswith("_"):
+                continue
+
+            try:
+                spec = importlib.util.spec_from_file_location(py_file.stem, py_file)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            except Exception as e:
+                logger.error(f"Failed to import {py_file}: {e}")
+                continue
+
+            for _, cls in inspect.getmembers(module, inspect.isclass):
+                if (issubclass(cls, base_class)
+                        and cls is not base_class
+                        and cls.__module__ == module.__name__
+                        and getattr(cls, "auto_discover", True)):
+                    try:
+                        yield cls.from_config(config or {})
+                    except Exception as e:
+                        logger.error(f"Failed to instantiate {cls.__name__}: {e}")
+
+    async def _register_builtin_tools(self):
+        config = {"workspace_root": self._workspace_root, "sandbox": self._sandbox}
+        for tool in self._discover("tools/builtin/extensions", BaseTool, config):
             self.tools.register(tool, layer="builtin")
+            logger.debug(f"Auto-discovered builtin tool: {tool.name}")
 
     async def _register_mcp_tools(self, mcp_servers: Dict[str, Any]):
         from capabilities.tools.mcp.mcp_client import MCPClientManager
@@ -60,13 +94,18 @@ class CapabilityRegistry:
 
     async def _register_workflow_tools(self):
         from capabilities.tools.workflow.workflow_wrapper import WorkflowToolWrapper
-        from capabilities.tools.workflow.extensions.document_workflow import DocumentCreationWorkflow
-        from capabilities.tools.workflow.extensions.test_workflow import TestWorkflow
 
-        for workflow_cls in [DocumentCreationWorkflow, TestWorkflow]:
-            workflow = workflow_cls()
-            wrapper = WorkflowToolWrapper(workflow, self.tools)
+        for wf in self._discover("tools/workflow/extensions", BaseWorkflow):
+            wrapper = WorkflowToolWrapper(wf, self.tools)
             self.tools.register(wrapper, layer="workflow")
+            logger.debug(f"Auto-discovered workflow: {wf.name}")
+
+    async def _register_skill_tools(self, skill_manager):
+        from capabilities.skills.skill_tool import SkillViewTool
+
+        if skill_manager.get_available_skills():
+            tool = SkillViewTool(skill_manager)
+            self.tools.register(tool, layer="builtin")
 
     async def execute_tool(self, name: str, params: Dict[str, Any]) -> Any:
         return await self.tools.execute(name, params)

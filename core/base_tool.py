@@ -15,6 +15,13 @@ from loguru import logger
 class BaseTool(ABC):
     """工具抽象基类"""
 
+    auto_discover = True
+
+    @classmethod
+    def from_config(cls, config: dict) -> "BaseTool":
+        """从配置创建实例，需要外部依赖的子类覆写此方法"""
+        return cls()
+
     # JSON Schema 类型到 Python 类型的映射
     _TYPE_MAP = {
         "string": str,

@@ -5,7 +5,6 @@ Exec Tools - 终端执行工具
 """
 
 import asyncio
-import subprocess
 from typing import Any, Dict
 from loguru import logger
 

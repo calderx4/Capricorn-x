@@ -6,5 +6,6 @@ Skills module - 技能层
 
 from .loader import SkillLoader
 from .manager import SkillManager
+from .skill_tool import SkillViewTool
 
-__all__ = ["SkillLoader", "SkillManager"]
+__all__ = ["SkillLoader", "SkillManager", "SkillViewTool"]
