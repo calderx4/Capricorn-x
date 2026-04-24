@@ -94,8 +94,8 @@ available: true
 ### 安装
 
 ```bash
-git clone https://github.com/your-username/capricorn.git
-cd capricorn
+git clone https://github.com/calderx4/Capricorn-x.git
+cd Capricorn-x
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
