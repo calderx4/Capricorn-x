@@ -14,6 +14,7 @@ from pathlib import Path as PathLib
 sys.path.insert(0, str(PathLib(__file__).parent.parent.parent.parent))
 
 from core.base_tool import BaseTool
+from core.sandbox import check_path
 
 
 def _resolve_path(path: str, workspace_root: str, sandbox: bool) -> Path:
@@ -23,12 +24,9 @@ def _resolve_path(path: str, workspace_root: str, sandbox: bool) -> Path:
         p = Path(workspace_root) / p
     p = p.resolve()
 
-    if sandbox:
-        root = Path(workspace_root).resolve()
-        try:
-            p.relative_to(root)
-        except ValueError:
-            raise ValueError(f"Path '{path}' is outside workspace (sandbox mode enabled)")
+    allowed, reason = check_path(str(p), workspace_root, sandbox)
+    if not allowed:
+        raise ValueError(reason)
 
     return p
 

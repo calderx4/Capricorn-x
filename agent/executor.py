@@ -8,7 +8,6 @@ Executor - Agent 执行器
 """
 
 import asyncio
-import json
 from typing import Optional
 from loguru import logger
 
@@ -23,8 +22,8 @@ from capabilities.skills.manager import SkillManager
 from memory.session import SessionManager
 from memory.long_term import LongTermMemory
 from memory.history import HistoryLog
-from capabilities.tools.workflow.extensions.memory_consolidation_workflow import MemoryConsolidationWorkflow
-from core.utils import strip_thinking_tags
+from capabilities.tools.workflow.extensions.memory_consolidation import MemoryConsolidationWorkflow
+from core import trace
 
 
 class CapricornAgent:
@@ -81,6 +80,7 @@ class CapricornAgent:
             workspace_root=self.config.workspace.root,
             sandbox=self.config.workspace.sandbox,
             skill_manager=self.skill_manager,
+            blocked_commands=self.config.blocked_commands,
         )
 
         # 4. 初始化会话管理器
@@ -218,23 +218,14 @@ class CapricornAgent:
                 to_consolidate = workflow.get_messages_to_consolidate(session_data)
                 num_remove = len(to_consolidate)
                 remaining = messages[num_remove:]
+                trace.consolidation(triggered_by, len(messages), len(remaining), True)
 
-                # 重写 session 文件，只保留裁剪后的消息
-                session_path = self.session_manager.get_session_path(thread_id)
-                with open(session_path, "w", encoding="utf-8") as f:
-                    for msg in remaining:
-                        content = msg.get("content", "")
-                        if content:
-                            content = strip_thinking_tags(content)
-                            msg = {**msg, "content": content}
-                        if msg.get("content"):
-                            f.write(json.dumps(msg, ensure_ascii=False) + "\n")
-
-                self.session_manager._sessions.pop(thread_id, None)
+                self.session_manager.rewrite_session(thread_id, remaining)
 
                 logger.info(f"Consolidated {num_remove} messages, kept {len(remaining)}")
             else:
                 logger.warning("Memory consolidation failed")
+                trace.consolidation(triggered_by, len(messages), len(messages), False)
 
         except Exception as e:
             logger.exception(f"Memory consolidation error: {e}")

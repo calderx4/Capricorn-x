@@ -84,9 +84,4 @@ def fallback_estimate(text: str) -> int:
     return int(total_chars / 4)
 
 
-# 兼容旧接口
-def count_tokens(text: str, model: str = "gpt-4") -> int:
-    """计算文本的 Token 数量（兼容接口）"""
-    if not text:
-        return 0
-    return TokenCounter.estimate_tokens(text)
+

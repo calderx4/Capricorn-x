@@ -19,12 +19,15 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent.parent))
+
+from loguru import logger
 
 from core.base_workflow import BaseWorkflow
 from core.token_counter import TokenCounter
 from memory.long_term import LongTermMemory
 from memory.history import HistoryLog
+from .prompts import SAVE_MEMORY_TOOL, build_consolidation_prompt
 
 
 class MemoryConsolidationWorkflow(BaseWorkflow):
@@ -53,31 +56,6 @@ class MemoryConsolidationWorkflow(BaseWorkflow):
 
     MEMORY_INJECTION_TOKENS = 2000
     TOTAL_CONTEXT_BUDGET = 16000
-
-    # save_memory 工具定义
-    SAVE_MEMORY_TOOL = [{
-        "type": "function",
-        "function": {
-            "name": "save_memory",
-            "description": "Save the memory consolidation result to persistent storage.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "history_entry": {
-                        "type": "string",
-                        "description": "A paragraph summarizing key events/decisions/topics. "
-                                        "Start with [YYYY-MM-DD HH:MM]. Include detail useful for grep search.",
-                    },
-                    "memory_update": {
-                        "type": "string",
-                        "description": "Full updated long-term memory as markdown. Include all existing "
-                                       "facts plus new ones. Return unchanged if nothing new.",
-                    },
-                },
-                "required": ["history_entry", "memory_update"],
-            },
-        }
-    }]
 
     def __init__(self, long_term_memory: LongTermMemory, history_log: HistoryLog,
                  llm_client, config: Dict = None):
@@ -157,27 +135,15 @@ class MemoryConsolidationWorkflow(BaseWorkflow):
             return True
 
         current_memory = self.long_term_memory.read()
-
-        prompt = f"""You are a memory consolidation agent. Analyze the conversation and extract important information.
-
-## Current Long-term Memory
-{current_memory or "(empty)"}
-
-## Conversation to Process
-{self._format_messages(messages_to_consolidate)}
-
-## CRITICAL INSTRUCTION
-You MUST call the `save_memory` tool now. Do NOT respond with text only.
-Call the tool with history_entry and memory_update parameters.
-
-Parameters:
-- history_entry: [YYYY-MM-DD HH:MM] Summary of conversation with key details
-- memory_update: Full updated MEMORY.md content (include all existing facts plus new ones)"""
+        prompt = build_consolidation_prompt(
+            current_memory,
+            self._format_messages(messages_to_consolidate),
+        )
 
         max_retries = 2
         for attempt in range(max_retries):
             try:
-                llm_with_tools = self.llm.bind_tools(self.SAVE_MEMORY_TOOL)
+                llm_with_tools = self.llm.bind_tools(SAVE_MEMORY_TOOL)
 
                 from langchain_core.messages import HumanMessage
                 response = await llm_with_tools.ainvoke([

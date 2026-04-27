@@ -91,6 +91,7 @@ class Config(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     skills: Dict[str, Any] = Field(default_factory=dict)
     agent: Dict[str, Any] = Field(default_factory=dict)
+    blocked_commands: list[str] = Field(default_factory=list)
 
     @classmethod
     def load(cls, config_path: str) -> "Config":

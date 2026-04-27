@@ -6,6 +6,15 @@
     "sandbox": true
   },
 
+  "blocked_commands": [
+    "rm -rf /",
+    "mkfs",
+    "dd if=",
+    "format",
+    "shutdown",
+    "reboot"
+  ],
+
   "llm": {
     "provider": "openai",
     "model": "MiniMax-M2.7",

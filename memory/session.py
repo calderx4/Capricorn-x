@@ -190,6 +190,26 @@ class SessionManager:
             logger.error(f"Failed to load session {thread_id}: {e}")
             return None
 
+    def rewrite_session(self, thread_id: str, messages: List[Dict[str, Any]]) -> None:
+        """
+        用指定消息列表重写 session 文件，并清除内存缓存。
+
+        用于记忆整合后裁剪 session。
+        """
+        session_path = self.get_session_path(thread_id)
+        session_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(session_path, "w", encoding="utf-8") as f:
+            for msg in messages:
+                content = msg.get("content", "")
+                if content:
+                    content = strip_thinking_tags(content)
+                    msg = {**msg, "content": content}
+                if msg.get("content"):
+                    f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+
+        self._sessions.pop(thread_id, None)
+
     def clear_session(self, thread_id: str) -> None:
         """
         清除会话

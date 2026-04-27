@@ -8,6 +8,5 @@ Workflow Tools module - 工作流工具层
 """
 
 from .workflow_wrapper import WorkflowToolWrapper
-from .registry import WorkflowRegistry
 
-__all__ = ["WorkflowToolWrapper", "WorkflowRegistry"]
+__all__ = ["WorkflowToolWrapper"]
