@@ -60,13 +60,10 @@
   },
 
   "skills": {
-    "skills_dir": "capabilities/skills/skills",
-    "preload_always": true
+    "skills_dir": "capabilities/skills/skills"
   },
 
   "agent": {
-    "max_iterations": 50,
-    "max_stack_depth": 10,
-    "enable_state_tracking": true
+    "max_iterations": 50
   }
 }

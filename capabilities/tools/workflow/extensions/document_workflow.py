@@ -7,10 +7,6 @@ Document Creation Workflow - 文档创建工作流
 from typing import Any, List
 from datetime import datetime
 
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-
 from core.base_workflow import BaseWorkflow
 
 

@@ -62,7 +62,7 @@
 | **MEMORY.md** | Markdown | 长期知识，注入每轮 system prompt |
 | **HISTORY.md** | Markdown | 对话时间线摘要，可搜索 |
 
-整合流程：每轮对话前检查消息数和 token 估算，超阈值时提取旧消息 → 调用 LLM 生成摘要和记忆更新 → 写入 HISTORY.md 和 MEMORY.md → 裁剪 session 文件。
+整合流程：每轮对话前检查消息数和 token 数，超阈值时提取旧消息 → 调用 LLM 生成摘要和记忆更新 → 写入 HISTORY.md 和 MEMORY.md → 裁剪 session 文件。
 
 ## 技能系统
 
@@ -99,6 +99,7 @@ cd Capricorn-x
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+pip install -e .
 ```
 
 ### 配置
@@ -161,13 +162,15 @@ capricorn/
 ├── core/                   # 核心抽象
 │   ├── base_tool.py        # 工具基类（JSON Schema + LangChain 桥接）
 │   ├── base_workflow.py    # 工作流基类
-│   ├── interfaces.py       # Protocol 接口定义
-│   └── token_counter.py    # Token 计数（tiktoken + 启发式回退）
+│   ├── sandbox.py          # 路径与命令沙盒校验
+│   ├── token_counter.py    # Token 计数（tiktoken + 启发式回退）
+│   └── trace.py            # 结构化决策链路追踪（JSONL）
 ├── memory/                 # 记忆层
 │   ├── session.py          # JSONL 会话管理（内存缓存 + 磁盘持久化）
 │   ├── long_term.py        # MEMORY.md 管理
 │   └── history.py          # HISTORY.md 管理
 ├── run.py                  # CLI 入口
+├── pyproject.toml          # 项目配置（pip install -e . 可编辑安装）
 ├── requirements.txt
 └── tests/                  # pytest 测试
 ```

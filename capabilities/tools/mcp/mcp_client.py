@@ -12,10 +12,6 @@ from contextlib import AsyncExitStack
 from typing import Any, Dict
 from loguru import logger
 
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-
 from config.settings import Config, MCPServerConfig
 from capabilities.tools.registry import ToolRegistry
 from .mcp_wrapper import MCPToolWrapper

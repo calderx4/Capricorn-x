@@ -11,10 +11,6 @@ import asyncio
 from typing import Optional
 from loguru import logger
 
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from agent.agent import CapricornGraph
 from config.settings import Config
 from capabilities.capability_registry import CapabilityRegistry
@@ -24,6 +20,7 @@ from memory.long_term import LongTermMemory
 from memory.history import HistoryLog
 from capabilities.tools.workflow.extensions.memory_consolidation import MemoryConsolidationWorkflow
 from core import trace
+from core.token_counter import TokenCounter
 
 
 class CapricornAgent:
@@ -103,6 +100,7 @@ class CapricornAgent:
             self.history_log,
             self.llm_client,
             sandbox=self.config.workspace.sandbox,
+            max_iterations=self.config.agent.get("max_iterations", 50),
         )
 
         logger.info("✓ Capricorn Agent initialized")
@@ -186,11 +184,9 @@ class CapricornAgent:
 
             # 触发条件 2：总 token 数超阈值（仅条数未触发时才算）
             if not triggered_by:
-                # 快速估算：中文 ~1.5 字符/token，英文 ~4 字符/token
-                total_chars = sum(len(m.get("content", "")) for m in messages)
-                est_tokens = total_chars // 2 if total_chars > 0 else 0
+                est_tokens = TokenCounter.count_messages_tokens(messages)
                 if est_tokens > mem_cfg.token_threshold:
-                    triggered_by = f"tokens(~{est_tokens} > {mem_cfg.token_threshold})"
+                    triggered_by = f"tokens({est_tokens} > {mem_cfg.token_threshold})"
 
             if not triggered_by:
                 return

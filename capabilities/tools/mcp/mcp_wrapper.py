@@ -8,10 +8,6 @@ import asyncio
 from typing import Any, Dict
 from loguru import logger
 
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-
 from core.base_tool import BaseTool
 
 

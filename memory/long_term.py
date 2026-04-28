@@ -6,11 +6,7 @@ Long Term Memory - 长期记忆管理
 - 提供读写接口
 """
 
-from pathlib import Path
 from loguru import logger
-
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.settings import WorkspaceConfig
 

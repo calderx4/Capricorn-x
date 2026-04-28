@@ -14,9 +14,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from loguru import logger
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from config.settings import WorkspaceConfig
 from core.utils import strip_thinking_tags
 

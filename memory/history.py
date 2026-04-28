@@ -7,12 +7,8 @@ History Log - 历史日志管理
 - 提供搜索接口
 """
 
-from pathlib import Path
 from typing import List
 from loguru import logger
-
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.settings import WorkspaceConfig
 

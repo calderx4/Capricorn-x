@@ -10,10 +10,6 @@ import asyncio
 from typing import Any, Dict, List
 from loguru import logger
 
-import sys
-from pathlib import Path as PathLib
-sys.path.insert(0, str(PathLib(__file__).parent.parent.parent.parent))
-
 from core.base_tool import BaseTool
 from core.sandbox import check_path, check_command
 

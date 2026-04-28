@@ -17,9 +17,7 @@ from langchain_core.messages import (
 )
 from loguru import logger
 
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.utils import strip_thinking_tags
 from core import trace
@@ -27,8 +25,6 @@ from core import trace
 
 class CapricornGraph:
     """Capricorn Agent — 原生 Function Calling 循环"""
-
-    MAX_ITERATIONS = 50
 
     def __init__(
         self,
@@ -39,6 +35,7 @@ class CapricornGraph:
         history_log,
         llm_client=None,
         sandbox: bool = True,
+        max_iterations: int = 50,
     ):
         self.capability_registry = capability_registry
         self.skill_manager = skill_manager
@@ -47,6 +44,7 @@ class CapricornGraph:
         self.history_log = history_log
         self.llm_client = llm_client
         self.sandbox = sandbox
+        self.max_iterations = max_iterations
 
         # 预绑定工具
         if self.llm_client:
@@ -85,7 +83,7 @@ class CapricornGraph:
         tools_used = []
 
         try:
-            for i in range(self.MAX_ITERATIONS):
+            for i in range(self.max_iterations):
                 round_start_ts = asyncio.get_event_loop().time()
                 logger.info(f"Thinking... (iteration {i + 1})")
                 trace.round_start(i + 1, len(messages))
