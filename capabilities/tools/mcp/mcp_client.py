@@ -108,7 +108,7 @@ class MCPClientManager:
                         httpx.AsyncClient(
                             headers=resolved_headers or None,
                             follow_redirects=True,
-                            timeout=None
+                            timeout=httpx.Timeout(30.0, connect=10.0)
                         )
                     )
                     read, write, _ = await self._stack.enter_async_context(
@@ -132,6 +132,7 @@ class MCPClientManager:
                 registered_count = 0
 
                 # 注册工具
+                server_lock = asyncio.Lock()
                 for tool_def in tools.tools:
                     wrapped_name = f"mcp_{name}_{tool_def.name}"
 
@@ -140,7 +141,7 @@ class MCPClientManager:
                         continue
 
                     # 创建工具包装器并注册
-                    wrapper = MCPToolWrapper(session, name, tool_def, tool_timeout=cfg.tool_timeout)
+                    wrapper = MCPToolWrapper(session, name, tool_def, tool_timeout=cfg.tool_timeout, lock=server_lock)
                     registry.register(wrapper, layer=layer)
                     registered_count += 1
 
@@ -157,7 +158,7 @@ class MCPClientManager:
         if self._stack:
             try:
                 await self._stack.aclose()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Error during MCP disconnect: {e}")
             self._stack = None
-            logger.info("🔌 MCP connections closed")
+            logger.info("MCP connections closed")

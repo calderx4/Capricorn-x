@@ -73,6 +73,9 @@ class ReadFileTool(BaseTool):
             if not file_path.is_file():
                 return f"Error: Not a file: {path}"
 
+            size = file_path.stat().st_size
+            if size > 10 * 1024 * 1024:
+                return f"Error: File too large ({size // 1024 // 1024}MB), max 10MB"
             content = file_path.read_text(encoding="utf-8")
             logger.debug(f"Read file: {path} ({len(content)} chars)")
             return content
@@ -140,6 +143,86 @@ class WriteFileTool(BaseTool):
         except Exception as e:
             logger.error(f"Failed to write file '{path}': {e}")
             return f"Error: Failed to write file: {str(e)}"
+
+
+class EditFileTool(BaseTool):
+    """精准编辑文件工具 — 字符串替换"""
+
+    def __init__(self, workspace_root: str = "./workspace", sandbox: bool = True):
+        self._workspace_root = workspace_root
+        self._sandbox = sandbox
+
+    @classmethod
+    def from_config(cls, config: dict) -> "EditFileTool":
+        return cls(config["workspace_root"], config.get("sandbox", True))
+
+    @property
+    def name(self) -> str:
+        return "edit_file"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Perform exact string replacement in a file. "
+            "Finds `old_string` and replaces it with `new_string`. "
+            "Fails if old_string is not found or appears more than once (unless replace_all=true). "
+            "Prefer this over write_file for making small, targeted changes to existing files."
+        )
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The path to the file to edit",
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "The exact text to find in the file",
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "The text to replace old_string with",
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "If true, replace all occurrences of old_string. Default: false",
+                },
+            },
+            "required": ["path", "old_string", "new_string"],
+        }
+
+    async def execute(
+        self, path: str, old_string: str, new_string: str, replace_all: bool = False
+    ) -> str:
+        try:
+            file_path = _resolve_path(path, self._workspace_root, self._sandbox)
+
+            if not file_path.exists():
+                return f"Error: File not found: {path}"
+            if not file_path.is_file():
+                return f"Error: Not a file: {path}"
+
+            content = file_path.read_text(encoding="utf-8")
+
+            count = content.count(old_string)
+            if count == 0:
+                return f"Error: old_string not found in {path}"
+            if count > 1 and not replace_all:
+                return f"Error: old_string appears {count} times in {path}. Use replace_all=true to replace all occurrences, or provide more surrounding context to make it unique."
+
+            new_content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
+            file_path.write_text(new_content, encoding="utf-8")
+            logger.debug(f"Edited file: {path} ({count} replacement(s))")
+            return f"Successfully edited {path} ({count} replacement(s))"
+
+        except ValueError as e:
+            return f"Error: {e}"
+        except Exception as e:
+            logger.error(f"Failed to edit file '{path}': {e}")
+            return f"Error: Failed to edit file: {str(e)}"
 
 
 class ListFilesTool(BaseTool):

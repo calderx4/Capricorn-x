@@ -16,6 +16,7 @@
 │ 内置工具  │ MCP 工具  │ 工作流        │
 │ 文件读写  │ 外部 API  │ 多步骤编排     │
 │ Shell    │ 联网服务  │ 记忆整合       │
+│ Todo     │          │               │
 └──────────┴──────────┴───────────────┘
           │
      ┌────┴────┐
@@ -25,13 +26,14 @@
 
 ## 特性
 
-- **原生 FC 循环** — 直接使用 LLM function calling，工具并发执行（asyncio.gather），迭代上限保护
+- **原生 FC 循环** — 直接使用 LLM function calling，工具通过 ToolRegistry 并发执行（asyncio.gather），含参数类型转换与校验，迭代上限保护
 - **三层能力** — 内置工具 / MCP 协议 / 工作流，统一注册、分层管理，目录扫描自动发现
-- **MCP 集成** — 支持 stdio、SSE、streamable_http 三种传输方式，工具自动发现并命名空间隔离（`mcp_{server}_{tool}`）
-- **多 LLM 提供商** — Anthropic Claude、OpenAI 兼容 API（MiniMax 等），配置切换即可
-- **记忆系统** — 会话持久化（JSONL）、长期记忆（MEMORY.md）、历史日志（HISTORY.md）
-- **自动记忆整合** — 对话超过阈值时自动调用 LLM 整合记忆，含失败熔断机制（连续失败 3 次后回退为原始归档）
+- **MCP 集成** — 支持 stdio、SSE、streamable_http 三种传输方式，工具自动发现并命名空间隔离（`mcp_{server}_{tool}`），每 server 独立并发锁
+- **多 LLM 提供商** — Anthropic Claude、OpenAI 兼容 API（DeepSeek、MiniMax、GLM、Qwen 等），配置切换即可。自动兼容各厂商思考模式的非标准字段
+- **记忆系统** — 原子写入持久化（JSONL）、长期记忆（MEMORY.md）、历史日志（HISTORY.md）。Session 完整保存 tool call 轮次（含 reasoning_content）
+- **自动记忆整合** — 对话超过阈值时自动调用 LLM 整合记忆，整合裁剪保持 tool call 轮次完整性，含失败熔断机制
 - **技能系统** — SKILL.md 定义，渐进式披露：system prompt 列出可用技能摘要，LLM 通过 `skill_view` tool 按需加载完整指令
+- **沙盒安全** — 文件路径限制在工作区内，命令黑名单拦截危险操作
 
 ## 核心：FC 循环
 
@@ -39,7 +41,7 @@
 
 1. 把完整消息列表 + 工具 schema 发给 LLM
 2. 收到响应后检查是否有 `tool_calls`
-3. 有 → 并发执行所有工具，把 `AIMessage`（含 tool_calls）和对应的 `ToolMessage` 追加到消息列表，回到步骤 1
+3. 有 → 通过 ToolRegistry 并发执行所有工具（经 cast_params + validate_params 校验），把 `AIMessage`（含 tool_calls）和对应的 `ToolMessage` 追加到消息列表，回到步骤 1
 4. 没有 → 模型给出最终回复，结束循环
 
 模型自己决定调不调工具、调哪个、什么时候停。循环本身只负责执行和转发。
@@ -48,7 +50,7 @@
 
 | 层级 | 说明 | 当前工具 |
 |------|------|----------|
-| **Layer 1 内置工具** | 原子操作，本地执行 | read_file、write_file、list_files、exec、skill_view |
+| **Layer 1 内置工具** | 原子操作，本地执行 | read_file、write_file、list_files、exec、todo、skill_view |
 | **Layer 2 MCP 工具** | 通过 MCP 协议连接外部服务 | MiniMax MCP、高德地图（可扩展） |
 | **Layer 3 工作流** | 多步骤编排 | 文档创建、自检、记忆整合 |
 
@@ -58,11 +60,11 @@
 
 | 组件 | 存储 | 用途 |
 |------|------|------|
-| **Session** | JSONL 文件 | 完整对话记录，每轮追加 |
-| **MEMORY.md** | Markdown | 长期知识，注入每轮 system prompt |
+| **Session** | JSONL 文件（原子写入） | 完整对话记录，含 tool call 轮次和 reasoning_content |
+| **MEMORY.md** | Markdown（原子写入） | 长期知识，注入每轮 system prompt |
 | **HISTORY.md** | Markdown | 对话时间线摘要，可搜索 |
 
-整合流程：每轮对话前检查消息数和 token 数，超阈值时提取旧消息 → 调用 LLM 生成摘要和记忆更新 → 写入 HISTORY.md 和 MEMORY.md → 裁剪 session 文件。
+整合流程：每轮对话前检查消息数，超阈值时提取旧消息 → 调用 LLM 生成摘要和记忆更新 → 写入 HISTORY.md 和 MEMORY.md → 裁剪 session 文件（保持 tool call 轮次完整性，去除孤儿消息）。
 
 ## 技能系统
 
@@ -113,7 +115,7 @@ cp .env.example .env
 2. 编辑 `.env`，填入 API Key：
 
 ```env
-MINIMAX_API_KEY=your_api_key_here
+DEEPSEEK_API_KEY=your_api_key_here
 AMAP_MAPS_API_KEY=your_amap_key_here   # 可选
 ```
 
@@ -143,7 +145,7 @@ python run.py
 capricorn/
 ├── agent/                  # Agent 层
 │   ├── agent.py            # 原生 FC 循环（核心调度）
-│   └── executor.py         # Agent 编排器 / 生命周期管理 / 记忆整合触发
+│   └── executor.py         # Agent 编排器 / 生命周期管理 / LangChain 兼容性 patch
 ├── capabilities/           # 能力层
 │   ├── capability_registry.py  # 统一能力注册中心
 │   ├── skills/             # 技能系统
@@ -152,27 +154,29 @@ capricorn/
 │   │   ├── skill_tool.py   # skill_view tool（LLM 按需加载技能）
 │   │   └── skills/         # 技能定义文件
 │   └── tools/              # 工具系统
-│       ├── registry.py     # 工具注册与并发执行
+│       ├── registry.py     # 工具注册与并发执行（含参数校验）
 │       ├── builtin/        # Layer 1：内置工具
-│       ├── mcp/            # Layer 2：MCP 工具
+│       ├── mcp/            # Layer 2：MCP 工具（含并发锁）
 │       └── workflow/       # Layer 3：工作流
 ├── config/                 # 配置层
 │   ├── config.json         # 运行时配置（支持 ${ENV_VAR} 注入）
+│   ├── prompts/            # System prompt 模板
 │   └── settings.py         # Pydantic v2 配置模型
 ├── core/                   # 核心抽象
 │   ├── base_tool.py        # 工具基类（JSON Schema + LangChain 桥接）
 │   ├── base_workflow.py    # 工作流基类
 │   ├── sandbox.py          # 路径与命令沙盒校验
 │   ├── token_counter.py    # Token 计数（tiktoken + 启发式回退）
-│   └── trace.py            # 结构化决策链路追踪（JSONL）
+│   ├── trace.py            # 结构化决策链路追踪（JSONL）
+│   └── utils.py            # 工具函数（thinking tag 清理等）
 ├── memory/                 # 记忆层
-│   ├── session.py          # JSONL 会话管理（内存缓存 + 磁盘持久化）
-│   ├── long_term.py        # MEMORY.md 管理
+│   ├── session.py          # JSONL 会话管理（原子写入 + tool call 完整保存）
+│   ├── long_term.py        # MEMORY.md 管理（原子写入）
 │   └── history.py          # HISTORY.md 管理
 ├── run.py                  # CLI 入口
 ├── pyproject.toml          # 项目配置（pip install -e . 可编辑安装）
 ├── requirements.txt
-└── tests/                  # pytest 测试
+└── tests/                  # pytest 测试（111 tests）
 ```
 
 ## 配置说明
@@ -182,14 +186,25 @@ capricorn/
 | 字段 | 说明 |
 |------|------|
 | `workspace.root` | 工作空间目录路径 |
+| `workspace.sandbox` | 是否限制文件操作在工作区内（默认 true） |
 | `llm.provider` | LLM 提供商（`openai` / `anthropic`） |
 | `llm.model` | 模型名称 |
-| `llm.api_key` | API Key（建议使用 `${MINIMAX_API_KEY}`） |
+| `llm.api_key` | API Key（建议使用 `${DEEPSEEK_API_KEY}`） |
+| `llm.api_base` | 自定义 API 地址（OpenAI 兼容服务） |
 | `llm.max_tokens` | 最大输出 token 数 |
 | `mcp_servers` | MCP 服务器配置（支持 stdio / sse / streamable_http） |
-| `memory.message_threshold` | 触发整合的消息数阈值（默认 20） |
-| `memory.token_threshold` | 触发整合的 token 阈值（默认 8000） |
+| `memory.message_threshold` | 触发整合的消息数阈值（默认 120） |
+| `memory.messages_to_keep` | 整合后保留的消息数（默认 60） |
+| `memory.token_threshold` | 触发整合的 token 阈值（默认 100000） |
+| `memory.context_budget` | 总上下文 token 上限（默认 1280000） |
 | `agent.max_iterations` | FC 循环迭代上限（默认 50） |
+| `blocked_commands` | 命令黑名单 |
+
+## 多厂商兼容
+
+`provider: "openai"` 分支支持所有 OpenAI 兼容 API。初始化时自动 patch LangChain 的消息序列化，确保各厂商返回的非标准字段（如 DeepSeek 的 `reasoning_content`）在多轮对话中正确保留和回传。无需额外配置，切换 `api_base` 和 `api_key` 即可使用不同厂商。
+
+已验证兼容：DeepSeek、MiniMax、GLM、Qwen。
 
 ## 许可证
 

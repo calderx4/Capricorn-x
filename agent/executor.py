@@ -10,6 +10,7 @@ Executor - Agent 执行器
 import asyncio
 from typing import Optional
 from loguru import logger
+from langchain_core.messages import AIMessage
 
 from agent.agent import CapricornGraph
 from config.settings import Config
@@ -119,6 +120,7 @@ class CapricornAgent:
             )
         elif llm_config.provider == "openai":
             from langchain_openai import ChatOpenAI
+            from langchain_openai.chat_models import base as _lc_base
 
             # 构建 ChatOpenAI 参数
             openai_params = {
@@ -128,11 +130,37 @@ class CapricornAgent:
                 "api_key": llm_config.api_key
             }
 
-            # 如果有自定义 api_base，添加到参数中
             if llm_config.api_base:
                 openai_params["base_url"] = llm_config.api_base
 
             self.llm_client = ChatOpenAI(**openai_params)
+
+            # Patch：LangChain 解析 API 响应时不保留非标准字段（如 reasoning_content），
+            # 序列化时也不带 additional_kwargs。两个方向都补回来。
+            _LC_KNOWN_KEYS = {
+                "role", "content", "name", "id", "function_call", "tool_calls",
+                "audio", "refusal", "parsed",
+            }
+
+            _orig_to_msg = _lc_base._convert_dict_to_message
+            def _to_msg_with_extras(_dict):
+                msg = _orig_to_msg(_dict)
+                if isinstance(msg, AIMessage):
+                    for k, v in _dict.items():
+                        if k not in _LC_KNOWN_KEYS and k not in msg.additional_kwargs:
+                            msg.additional_kwargs[k] = v
+                return msg
+            _lc_base._convert_dict_to_message = _to_msg_with_extras
+
+            _orig_to_dict = _lc_base._convert_message_to_dict
+            def _to_dict_with_extras(message, api="chat/completions"):
+                d = _orig_to_dict(message, api=api)
+                if isinstance(message, AIMessage) and message.additional_kwargs:
+                    for k, v in message.additional_kwargs.items():
+                        if k not in d:
+                            d[k] = v
+                return d
+            _lc_base._convert_message_to_dict = _to_dict_with_extras
         else:
             raise ValueError(f"Unsupported LLM provider: {llm_config.provider}")
 
@@ -208,12 +236,17 @@ class CapricornAgent:
             session_data = {"messages": messages}
             logger.info(f"Consolidating {len(messages)} messages, keep={mem_cfg.messages_to_keep}")
             success = await workflow.execute(session_data=session_data)
-            logger.info(f"Consolidation result: {success}, consecutive_failures={workflow._consecutive_failures}")
+            logger.info(f"Consolidation result: {success}")
 
             if success:
                 to_consolidate = workflow.get_messages_to_consolidate(session_data)
                 num_remove = len(to_consolidate)
                 remaining = messages[num_remove:]
+
+                # 去掉开头的孤儿 tool 消息（其父 AIMessage 已被整合掉）
+                while remaining and remaining[0].get("role") == "tool":
+                    remaining.pop(0)
+
                 trace.consolidation(triggered_by, len(messages), len(remaining), True)
 
                 self.session_manager.rewrite_session(thread_id, remaining)

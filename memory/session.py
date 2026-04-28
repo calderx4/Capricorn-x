@@ -8,6 +8,8 @@ Session Manager - 会话管理
 """
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
@@ -16,6 +18,35 @@ from loguru import logger
 
 from config.settings import WorkspaceConfig
 from core.utils import strip_thinking_tags
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """原子写入：先写临时文件，再 rename 替换。防止崩溃时截断。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _serialize_message(msg: Dict[str, Any]) -> str:
+    """序列化单条消息。保留含 tool_calls 等结构字段的消息（即使 content 为空）。"""
+    content = msg.get("content", "")
+    if content:
+        content = strip_thinking_tags(content)
+        msg = {**msg, "content": content}
+    # 跳过既无 content 又无结构字段的消息
+    has_structural = msg.get("tool_calls") or msg.get("tool_call_id") or msg.get("tools_used")
+    if not msg.get("content") and not has_structural:
+        return ""
+    return json.dumps(msg, ensure_ascii=False) + "\n"
 
 
 @dataclass
@@ -121,17 +152,12 @@ class SessionManager:
         """
         try:
             session_path = self.get_session_path(session.thread_id)
-            session_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # 写入文件（覆盖模式）
-            with open(session_path, "w", encoding="utf-8") as f:
-                for msg in session.messages:
-                    content = msg.get("content", "")
-                    if content:
-                        content = strip_thinking_tags(content)
-                        msg = {**msg, "content": content}
-                    if msg.get("content"):
-                        f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+            lines = []
+            for msg in session.messages:
+                line = _serialize_message(msg)
+                if line:
+                    lines.append(line)
+            _atomic_write(session_path, "".join(lines))
 
             session.updated_at = datetime.now()
             logger.debug(f"Saved session: {session.thread_id} ({len(session.messages)} messages)")
@@ -167,7 +193,9 @@ class SessionManager:
 
                     try:
                         data = json.loads(line)
-                        if data.get("content"):
+                        has_content = data.get("content")
+                        has_structural = data.get("tool_calls") or data.get("tool_call_id") or data.get("tools_used")
+                        if has_content or has_structural:
                             messages.append(data)
                     except json.JSONDecodeError as e:
                         logger.warning(f"Skipping invalid JSON at line {line_num}: {e}")
@@ -188,23 +216,14 @@ class SessionManager:
             return None
 
     def rewrite_session(self, thread_id: str, messages: List[Dict[str, Any]]) -> None:
-        """
-        用指定消息列表重写 session 文件，并清除内存缓存。
-
-        用于记忆整合后裁剪 session。
-        """
+        """用指定消息列表重写 session 文件，并清除内存缓存。"""
         session_path = self.get_session_path(thread_id)
-        session_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(session_path, "w", encoding="utf-8") as f:
-            for msg in messages:
-                content = msg.get("content", "")
-                if content:
-                    content = strip_thinking_tags(content)
-                    msg = {**msg, "content": content}
-                if msg.get("content"):
-                    f.write(json.dumps(msg, ensure_ascii=False) + "\n")
-
+        lines = []
+        for msg in messages:
+            line = _serialize_message(msg)
+            if line:
+                lines.append(line)
+        _atomic_write(session_path, "".join(lines))
         self._sessions.pop(thread_id, None)
 
     def clear_session(self, thread_id: str) -> None:

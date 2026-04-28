@@ -80,7 +80,7 @@ def fallback_estimate(text: str) -> int:
     total_chars = len(text)
 
     if total_chars > 0 and chinese_chars / total_chars > 0.3:
-        return int(total_chars / 1.5)
+        return int(total_chars / 2)
     return int(total_chars / 4)
 
 

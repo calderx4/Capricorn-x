@@ -35,8 +35,13 @@ def check_command(command: str, blocked_commands: list[str]) -> tuple[bool, str]
     Returns:
         (allowed, reason)
     """
-    cmd_lower = command.lower()
+    import shlex
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.split()
+    base = parts[0].lower() if parts else ""
     for blocked in blocked_commands:
-        if blocked.lower() in cmd_lower:
-            return False, f"Blocked command: pattern '{blocked}' matched"
+        if base == blocked.lower():
+            return False, f"Blocked command: '{blocked}'"
     return True, ""

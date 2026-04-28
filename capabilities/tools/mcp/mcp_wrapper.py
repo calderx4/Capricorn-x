@@ -2,6 +2,7 @@
 MCP Tool Wrapper - MCP 工具包装器
 
 将 MCP 工具包装成 BaseTool 格式。
+同一 server 的所有 wrapper 共享一个 asyncio.Lock，防止并发调用导致协议帧交叉。
 """
 
 import asyncio
@@ -14,7 +15,8 @@ from core.base_tool import BaseTool
 class MCPToolWrapper(BaseTool):
     """MCP 工具包装器"""
 
-    def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30):
+    def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30,
+                 lock: asyncio.Lock = None):
         """
         初始化 MCP 工具包装器
 
@@ -23,6 +25,7 @@ class MCPToolWrapper(BaseTool):
             server_name: 服务器名称
             tool_def: 工具定义
             tool_timeout: 超时时间（秒）
+            lock: 同一 server 的共享锁（防止并发调用协议帧交叉）
         """
         self._session = session
         self._original_name = tool_def.name
@@ -34,6 +37,7 @@ class MCPToolWrapper(BaseTool):
         raw_schema = tool_def.inputSchema or {"type": "object", "properties": {}}
         self._parameters = self._normalize_schema(raw_schema)
         self._tool_timeout = tool_timeout
+        self._lock = lock
 
     @property
     def name(self) -> str:
@@ -48,12 +52,19 @@ class MCPToolWrapper(BaseTool):
         return self._parameters
 
     async def execute(self, **kwargs: Any) -> str:
-        """执行 MCP 工具"""
-        try:
-            result = await asyncio.wait_for(
+        """执行 MCP 工具（通过共享锁串行化同一 server 的并发调用）"""
+        async def _call():
+            return await asyncio.wait_for(
                 self._session.call_tool(self._original_name, arguments=kwargs),
                 timeout=self._tool_timeout,
             )
+
+        try:
+            if self._lock:
+                async with self._lock:
+                    result = await _call()
+            else:
+                result = await _call()
             return self._parse_result(result)
         except asyncio.TimeoutError:
             logger.error(f"MCP tool '{self._name}' timed out after {self._tool_timeout}s")

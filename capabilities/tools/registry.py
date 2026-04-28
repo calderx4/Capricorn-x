@@ -89,7 +89,7 @@ class ToolRegistry:
 
             result = await tool.execute(**params)
 
-            if isinstance(result, str) and result.startswith("Error"):
+            if isinstance(result, str) and result.startswith("Error:"):
                 return result + _HINT
 
             # 结构化：dict/list → JSON 字符串

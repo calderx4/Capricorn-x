@@ -9,6 +9,7 @@ Agent - 原生 Function Calling 循环
 """
 
 import asyncio
+import time
 from datetime import datetime
 from typing import Dict
 
@@ -49,10 +50,8 @@ class CapricornGraph:
         # 预绑定工具
         if self.llm_client:
             tools = self.capability_registry.get_langchain_tools()
-            self._tool_map = {t.name: t for t in tools}
             self._llm_with_tools = self.llm_client.bind_tools(tools)
         else:
-            self._tool_map = {}
             self._llm_with_tools = None
             logger.warning("LLM client not initialized")
 
@@ -84,7 +83,7 @@ class CapricornGraph:
 
         try:
             for i in range(self.max_iterations):
-                round_start_ts = asyncio.get_event_loop().time()
+                round_start_ts = time.monotonic()
                 logger.info(f"Thinking... (iteration {i + 1})")
                 trace.round_start(i + 1, len(messages))
 
@@ -95,7 +94,7 @@ class CapricornGraph:
                 logger.debug(f"[Trace] LLM 响应 (iter {i + 1}): {response_content[:500]}")
 
                 if not (hasattr(response, "tool_calls") and response.tool_calls):
-                    round_latency = int((asyncio.get_event_loop().time() - round_start_ts) * 1000)
+                    round_latency = int((time.monotonic() - round_start_ts) * 1000)
                     trace.round_end(i + 1, 0, round_latency)
                     logger.debug(f"[Trace] 无工具调用，FC 循环结束 (iter {i + 1})")
                     break
@@ -105,21 +104,49 @@ class CapricornGraph:
                 logger.info(f"Tool calls: {tool_names}")
                 logger.debug(f"[Trace] 工具调用详情: {tool_args}")
 
+                # 保存 AI 工具调用到 session（含 reasoning_content）
+                ai_tool_calls = []
+                for tc in response.tool_calls:
+                    ai_tool_calls.append({
+                        "id": tc["id"],
+                        "name": tc["name"],
+                        "args": tc["args"],
+                    })
+                rc = response.additional_kwargs.get("reasoning_content")
+                session.add_message("assistant", response_content or "",
+                                    tool_calls=ai_tool_calls,
+                                    reasoning_content=rc)
+
                 # 并发执行工具（带 trace）
                 tool_messages = await self._execute_tools(response.tool_calls, round=i + 1)
                 messages.extend(tool_messages)
                 tools_used.extend(tool_names)
 
-                round_latency = int((asyncio.get_event_loop().time() - round_start_ts) * 1000)
+                # 保存工具返回到 session
+                for tm in tool_messages:
+                    session.add_message("tool", tm.content, tool_call_id=tm.tool_call_id)
+
+                round_latency = int((time.monotonic() - round_start_ts) * 1000)
                 trace.round_end(i + 1, len(tool_names), round_latency)
 
                 for tm in tool_messages:
                     logger.debug(f"[Trace] 工具返回 (id={tm.tool_call_id}): {tm.content}")
 
             final_response = self._extract_content(messages[-1])
+
+            # 迭代上限检查
+            if i >= self.max_iterations - 1 and (hasattr(messages[-1], "tool_calls") and messages[-1].tool_calls):
+                logger.warning(f"FC loop hit max_iterations={self.max_iterations}")
+                final_response += (
+                    f"\n\n⚠ 已达到最大迭代次数 ({self.max_iterations})，"
+                    f"任务可能未完成。"
+                )
+
             logger.debug(f"[Trace] 最终回复: {final_response[:500]}")
             logger.debug(f"[Trace] 总迭代: {i + 1}, 使用工具: {tools_used}")
-            session.add_message("assistant", final_response, tools_used=tools_used)
+            final_rc = messages[-1].additional_kwargs.get("reasoning_content") if hasattr(messages[-1], "additional_kwargs") else None
+            session.add_message("assistant", final_response, tools_used=tools_used,
+                                reasoning_content=final_rc)
             self.session_manager.save_session(session)
             return final_response
 
@@ -130,16 +157,16 @@ class CapricornGraph:
     async def _execute_tools(self, tool_calls, round: int = 0) -> list:
         async def _run_one(call):
             name, args = call["name"], call["args"]
-            start = asyncio.get_event_loop().time()
+            start = time.monotonic()
             try:
-                result = await self._tool_map[name].ainvoke(args)
+                result = await self.capability_registry.tools.execute(name, args)
                 content = str(result)
-                latency = int((asyncio.get_event_loop().time() - start) * 1000)
+                latency = int((time.monotonic() - start) * 1000)
                 logger.info(f"  {name} -> {content[:100]}")
                 trace.tool_call(round, name, args, latency, "ok")
             except Exception as e:
                 content = f"Error: {e}"
-                latency = int((asyncio.get_event_loop().time() - start) * 1000)
+                latency = int((time.monotonic() - start) * 1000)
                 logger.error(f"Tool {name} failed: {e}")
                 trace.tool_call(round, name, args, latency, "error")
             return ToolMessage(content=content, tool_call_id=call["id"])
@@ -163,8 +190,18 @@ class CapricornGraph:
             return HumanMessage(content=content)
         elif role == "system":
             return SystemMessage(content=content)
+        elif role == "tool":
+            return ToolMessage(
+                content=content,
+                tool_call_id=msg.get("tool_call_id", ""),
+            )
         else:
-            return AIMessage(content=content)
+            ai_msg = AIMessage(content=content)
+            if msg.get("tool_calls"):
+                ai_msg.tool_calls = msg["tool_calls"]
+            if msg.get("reasoning_content") is not None:
+                ai_msg.additional_kwargs["reasoning_content"] = msg["reasoning_content"]
+            return ai_msg
 
     def _extract_content(self, message) -> str:
         content = getattr(message, "content", "")

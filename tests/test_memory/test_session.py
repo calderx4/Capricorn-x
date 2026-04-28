@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 
 from config.settings import WorkspaceConfig
-from memory.session import Session, SessionManager
+from memory.session import Session, SessionManager, _serialize_message
 
 
 class TestSession:
@@ -90,3 +90,71 @@ class TestSessionManager:
         data = json.loads(lines[0])
         assert data["role"] == "user"
         assert data["content"] == "test content"
+
+    def test_save_preserves_tool_calls(self, tmp_path):
+        mgr = SessionManager(self._make_workspace(tmp_path))
+        session = mgr.get_session("tc-test")
+        session.add_message("assistant", "",
+                            tool_calls=[{"id": "call_1", "name": "read_file", "args": {"path": "x"}}])
+        session.add_message("tool", "file content", tool_call_id="call_1")
+
+        mgr.save_session(session)
+        loaded = mgr.load_session("tc-test")
+        assert loaded is not None
+        assert len(loaded.messages) == 2
+        assert loaded.messages[0]["tool_calls"] is not None
+        assert loaded.messages[0]["tool_calls"][0]["name"] == "read_file"
+        assert loaded.messages[1]["role"] == "tool"
+        assert loaded.messages[1]["tool_call_id"] == "call_1"
+
+    def test_rewrite_session_preserves_structural_messages(self, tmp_path):
+        mgr = SessionManager(self._make_workspace(tmp_path))
+        session = mgr.get_session("rewrite-test")
+        session.add_message("user", "hello")
+        # AI message with tool_calls but empty content
+        session.add_message("assistant", "",
+                            tool_calls=[{"id": "c1", "name": "read_file", "args": {}}])
+        session.add_message("tool", "result", tool_call_id="c1")
+
+        mgr.save_session(session)
+        loaded = mgr.load_session("rewrite-test")
+        assert loaded is not None
+        # tool_calls message should be preserved even though content is empty
+        assert len(loaded.messages) == 3
+
+
+class TestSerializeMessage:
+    def test_normal_message(self):
+        msg = {"role": "user", "content": "hello"}
+        result = _serialize_message(msg)
+        assert "hello" in result
+        assert result.endswith("\n")
+
+    def test_tool_calls_message_preserved(self):
+        msg = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "name": "read_file", "args": {}}]
+        }
+        result = _serialize_message(msg)
+        assert result != ""  # 不被丢弃
+        data = json.loads(result)
+        assert "tool_calls" in data
+
+    def test_tool_message_preserved(self):
+        msg = {"role": "tool", "content": "result", "tool_call_id": "c1"}
+        result = _serialize_message(msg)
+        data = json.loads(result)
+        assert data["tool_call_id"] == "c1"
+
+    def test_empty_message_dropped(self):
+        msg = {"role": "assistant", "content": ""}
+        result = _serialize_message(msg)
+        assert result == ""
+
+    def test_thinking_tags_stripped(self):
+        msg = {"role": "assistant", "content": "<thinking>inner</thinking>response"}
+        result = _serialize_message(msg)
+        data = json.loads(result)
+        assert "<thinking>" not in data["content"]
+        assert "response" in data["content"]
