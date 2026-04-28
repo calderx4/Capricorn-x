@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 from typing import Dict, Any
 from pydantic import BaseModel, Field
+from loguru import logger
 
 
 class WorkspaceConfig(BaseModel):
@@ -91,6 +92,7 @@ class Config(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     skills: Dict[str, Any] = Field(default_factory=dict)
     agent: Dict[str, Any] = Field(default_factory=dict)
+    blocked_commands: list[str] = Field(default_factory=list)
 
     @classmethod
     def load(cls, config_path: str) -> "Config":
@@ -133,9 +135,15 @@ class Config(BaseModel):
             if "${" not in data:
                 return data
             import re
+            def _replace(m):
+                val = os.getenv(m.group(1))
+                if val is None:
+                    logger.warning(f"Environment variable not set: {m.group(1)}")
+                    return m.group(0)
+                return val
             return re.sub(
                 r'\$\{([^}]+)\}',
-                lambda m: os.getenv(m.group(1), m.group(0)),
+                _replace,
                 data,
             )
 

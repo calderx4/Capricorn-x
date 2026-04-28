@@ -12,9 +12,7 @@ import inspect
 from typing import Dict, Any, Generator
 from loguru import logger
 
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from capabilities.tools.registry import ToolRegistry
 from core.base_tool import BaseTool
@@ -29,11 +27,12 @@ class CapabilityRegistry:
         self._mcp_manager = None
 
     @classmethod
-    async def create(cls, mcp_servers: Dict[str, Any] = None, workspace_root: str = "./workspace", sandbox: bool = True, skill_manager=None) -> "CapabilityRegistry":
+    async def create(cls, mcp_servers: Dict[str, Any] = None, workspace_root: str = "./workspace", sandbox: bool = True, skill_manager=None, blocked_commands: list = None) -> "CapabilityRegistry":
         registry = cls()
         registry._workspace_root = workspace_root
         registry._sandbox = sandbox
         registry._skill_manager = skill_manager
+        registry._blocked_commands = blocked_commands or []
 
         # 注册内置工具（第 1 层：原子执行）
         await registry._register_builtin_tools()
@@ -81,7 +80,11 @@ class CapabilityRegistry:
                         logger.error(f"Failed to instantiate {cls.__name__}: {e}")
 
     async def _register_builtin_tools(self):
-        config = {"workspace_root": self._workspace_root, "sandbox": self._sandbox}
+        config = {
+            "workspace_root": self._workspace_root,
+            "sandbox": self._sandbox,
+            "blocked_commands": self._blocked_commands,
+        }
         for tool in self._discover("tools/builtin/extensions", BaseTool, config):
             self.tools.register(tool, layer="builtin")
             logger.debug(f"Auto-discovered builtin tool: {tool.name}")

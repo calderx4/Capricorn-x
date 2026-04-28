@@ -12,10 +12,6 @@ import json
 from typing import Dict, List, Any, Optional
 from loguru import logger
 
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
 from core.base_tool import BaseTool
 
 
@@ -93,7 +89,7 @@ class ToolRegistry:
 
             result = await tool.execute(**params)
 
-            if isinstance(result, str) and result.startswith("Error"):
+            if isinstance(result, str) and result.startswith("Error:"):
                 return result + _HINT
 
             # 结构化：dict/list → JSON 字符串

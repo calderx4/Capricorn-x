@@ -9,6 +9,7 @@ Agent - 原生 Function Calling 循环
 """
 
 import asyncio
+import time
 from datetime import datetime
 from typing import Dict
 
@@ -17,17 +18,14 @@ from langchain_core.messages import (
 )
 from loguru import logger
 
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.utils import strip_thinking_tags
+from core import trace
 
 
 class CapricornGraph:
     """Capricorn Agent — 原生 Function Calling 循环"""
-
-    MAX_ITERATIONS = 50
 
     def __init__(
         self,
@@ -38,6 +36,7 @@ class CapricornGraph:
         history_log,
         llm_client=None,
         sandbox: bool = True,
+        max_iterations: int = 50,
     ):
         self.capability_registry = capability_registry
         self.skill_manager = skill_manager
@@ -46,14 +45,13 @@ class CapricornGraph:
         self.history_log = history_log
         self.llm_client = llm_client
         self.sandbox = sandbox
+        self.max_iterations = max_iterations
 
         # 预绑定工具
         if self.llm_client:
             tools = self.capability_registry.get_langchain_tools()
-            self._tool_map = {t.name: t for t in tools}
             self._llm_with_tools = self.llm_client.bind_tools(tools)
         else:
-            self._tool_map = {}
             self._llm_with_tools = None
             logger.warning("LLM client not initialized")
 
@@ -74,30 +72,81 @@ class CapricornGraph:
 
         session.add_message("user", user_input)
 
+        # 记录本轮输入的 messages 结构
+        logger.debug(f"[Trace] 输入 messages 结构: {self._summarize_messages(messages)}")
+        logger.debug(f"[Trace] 用户输入: {user_input}")
+
         if not self._llm_with_tools:
             return "LLM 客户端未初始化"
 
         tools_used = []
 
         try:
-            for i in range(self.MAX_ITERATIONS):
+            for i in range(self.max_iterations):
+                round_start_ts = time.monotonic()
                 logger.info(f"Thinking... (iteration {i + 1})")
+                trace.round_start(i + 1, len(messages))
+
                 response = await self._llm_with_tools.ainvoke(messages)
                 messages.append(response)
 
+                response_content = self._extract_content(response)
+                logger.debug(f"[Trace] LLM 响应 (iter {i + 1}): {response_content[:500]}")
+
                 if not (hasattr(response, "tool_calls") and response.tool_calls):
+                    round_latency = int((time.monotonic() - round_start_ts) * 1000)
+                    trace.round_end(i + 1, 0, round_latency)
+                    logger.debug(f"[Trace] 无工具调用，FC 循环结束 (iter {i + 1})")
                     break
 
                 tool_names = [tc["name"] for tc in response.tool_calls]
+                tool_args = [{"name": tc["name"], "args": tc["args"]} for tc in response.tool_calls]
                 logger.info(f"Tool calls: {tool_names}")
+                logger.debug(f"[Trace] 工具调用详情: {tool_args}")
 
-                # 并发执行工具
-                tool_messages = await self._execute_tools(response.tool_calls)
+                # 保存 AI 工具调用到 session（含 reasoning_content）
+                ai_tool_calls = []
+                for tc in response.tool_calls:
+                    ai_tool_calls.append({
+                        "id": tc["id"],
+                        "name": tc["name"],
+                        "args": tc["args"],
+                    })
+                rc = response.additional_kwargs.get("reasoning_content")
+                session.add_message("assistant", response_content or "",
+                                    tool_calls=ai_tool_calls,
+                                    reasoning_content=rc)
+
+                # 并发执行工具（带 trace）
+                tool_messages = await self._execute_tools(response.tool_calls, round=i + 1)
                 messages.extend(tool_messages)
                 tools_used.extend(tool_names)
 
+                # 保存工具返回到 session
+                for tm in tool_messages:
+                    session.add_message("tool", tm.content, tool_call_id=tm.tool_call_id)
+
+                round_latency = int((time.monotonic() - round_start_ts) * 1000)
+                trace.round_end(i + 1, len(tool_names), round_latency)
+
+                for tm in tool_messages:
+                    logger.debug(f"[Trace] 工具返回 (id={tm.tool_call_id}): {tm.content}")
+
             final_response = self._extract_content(messages[-1])
-            session.add_message("assistant", final_response, tools_used=tools_used)
+
+            # 迭代上限检查
+            if i >= self.max_iterations - 1 and (hasattr(messages[-1], "tool_calls") and messages[-1].tool_calls):
+                logger.warning(f"FC loop hit max_iterations={self.max_iterations}")
+                final_response += (
+                    f"\n\n⚠ 已达到最大迭代次数 ({self.max_iterations})，"
+                    f"任务可能未完成。"
+                )
+
+            logger.debug(f"[Trace] 最终回复: {final_response[:500]}")
+            logger.debug(f"[Trace] 总迭代: {i + 1}, 使用工具: {tools_used}")
+            final_rc = messages[-1].additional_kwargs.get("reasoning_content") if hasattr(messages[-1], "additional_kwargs") else None
+            session.add_message("assistant", final_response, tools_used=tools_used,
+                                reasoning_content=final_rc)
             self.session_manager.save_session(session)
             return final_response
 
@@ -105,19 +154,34 @@ class CapricornGraph:
             logger.error(f"Agent execution failed: {e}")
             return f"执行失败: {str(e)}"
 
-    async def _execute_tools(self, tool_calls) -> list:
+    async def _execute_tools(self, tool_calls, round: int = 0) -> list:
         async def _run_one(call):
             name, args = call["name"], call["args"]
+            start = time.monotonic()
             try:
-                result = await self._tool_map[name].ainvoke(args)
+                result = await self.capability_registry.tools.execute(name, args)
                 content = str(result)
+                latency = int((time.monotonic() - start) * 1000)
                 logger.info(f"  {name} -> {content[:100]}")
+                trace.tool_call(round, name, args, latency, "ok")
             except Exception as e:
                 content = f"Error: {e}"
+                latency = int((time.monotonic() - start) * 1000)
                 logger.error(f"Tool {name} failed: {e}")
+                trace.tool_call(round, name, args, latency, "error")
             return ToolMessage(content=content, tool_call_id=call["id"])
 
         return await asyncio.gather(*[_run_one(tc) for tc in tool_calls])
+
+    def _summarize_messages(self, messages: list) -> str:
+        """生成 messages 列表的结构摘要"""
+        summary = []
+        for idx, msg in enumerate(messages):
+            role = type(msg).__name__
+            content = getattr(msg, "content", "")
+            preview = content[:80].replace("\n", " ") if content else "(empty)"
+            summary.append(f"  [{idx}] {role}: {preview}...")
+        return f"共 {len(messages)} 条:\n" + "\n".join(summary)
 
     def _dict_to_message(self, msg: Dict) -> BaseMessage:
         role = msg.get("role", "user")
@@ -126,8 +190,18 @@ class CapricornGraph:
             return HumanMessage(content=content)
         elif role == "system":
             return SystemMessage(content=content)
+        elif role == "tool":
+            return ToolMessage(
+                content=content,
+                tool_call_id=msg.get("tool_call_id", ""),
+            )
         else:
-            return AIMessage(content=content)
+            ai_msg = AIMessage(content=content)
+            if msg.get("tool_calls"):
+                ai_msg.tool_calls = msg["tool_calls"]
+            if msg.get("reasoning_content") is not None:
+                ai_msg.additional_kwargs["reasoning_content"] = msg["reasoning_content"]
+            return ai_msg
 
     def _extract_content(self, message) -> str:
         content = getattr(message, "content", "")
@@ -144,107 +218,121 @@ class CapricornGraph:
         return content
 
     def _build_system_prompt(self) -> str:
-        parts = []
+        template_path = Path(__file__).parent.parent / "config" / "prompts" / "system.md"
+        template = template_path.read_text(encoding="utf-8")
 
-        # ── 身份与核心行为 ──
-        parts.append("""# Capricorn Agent
-
-You are Capricorn, an intelligent AI assistant. You are helpful, knowledgeable, and direct.
-
-## Core Rules
-
-1. **Tool-use enforcement**: You MUST use your tools to take action — do not describe
-   what you would do without actually doing it. When you say you will perform an action,
-   you MUST immediately make the corresponding tool call in the same response.
-   Never end your turn with a promise of future action — execute it now.
-
-2. **Direct answers**: Answer user questions directly. Do not prefix with unnecessary
-   explanations about what you are going to do. Just do it.
-
-3. **Error recovery**: If a tool call fails, analyze the error and try a different
-   approach. Do not repeat the exact same failed call.
-
-4. **Conciseness**: Be concise in your responses. Provide the information the user
-   asked for without unnecessary elaboration.""")
-
-        # ── 工作区信息 ──
         workspace_root = getattr(
             getattr(self.session_manager, "workspace", None), "root", "./workspace"
         )
-        if self.sandbox:
-            parts.append(f"""# Workspace (Sandbox Mode)
 
-Your workspace is at `{workspace_root}`. Sandbox mode is enabled.
+        # 工作区（sandbox 开关只控制是否限制在 workspace 内，不影响默认 cwd）
+        sandbox_note = "（沙盒模式：路径限制在工作区内）" if self.sandbox else "（可访问工作区外的路径）"
+        workspace_section = (
+            f"# Workspace\n\n"
+            f"工作区根目录：`{workspace_root}` {sandbox_note}\n"
+            f"所有工具（read_file、write_file、list_files、exec）都以工作区根目录为基准。\n"
+            f"路径直接写相对路径，例如 `main/my-task/index.html`。"
+            f" 不要加 `{workspace_root}/` 前缀。\n\n"
+            f"规则：\n"
+            f"- 任务文件放在 `main/<任务名>/` 下，每个任务一个独立文件夹。\n"
+            f"- `exec` 执行命令时默认在工作区根目录下运行。"
+            f" 所以 `python main/my-task/app.py` 能直接找到文件。\n"
+            f"- 操作前先用 `list_files` 查看工作区结构。"
+        )
 
-Rules:
-- All file operations are restricted to the workspace directory.
-- Paths outside the workspace will be rejected. Use relative paths or paths starting with `{workspace_root}`.
-- Use `list_files` to explore the workspace structure before working with files.""")
-        else:
-            parts.append(f"""# Workspace
-
-Your workspace is at `{workspace_root}`. This is your working directory for all file operations.
-
-Rules:
-- You have access to the full filesystem. Use this power responsibly.
-- When writing code, creating documents, or saving any output, prefer writing to the workspace.
-- Use `list_files` to explore directories before working with files.
-- All paths passed to tools should be relative to the workspace root or absolute paths starting with `{workspace_root}`.""")
-
-        # ── 长期记忆 ──
+        # 长期记忆
         memory_content = self.long_term_memory.read()
         if memory_content:
-            parts.append(f"""# Long-term Memory
+            memory_section = (
+                "# Long-term Memory\n\n"
+                "以下包含需要始终记住的重要事实、偏好和上下文。\n\n"
+                f"{memory_content}"
+            )
+        else:
+            memory_section = ""
 
-This contains important facts, preferences, and context that should always be remembered.
-
-{memory_content}""")
-
-        # ── 历史摘要 ──
+        # 历史摘要
         history_lines = self.history_log.read(limit=10)
         if history_lines:
-            parts.append(
-                "# Recent History\n\nSummaries of recent conversations:\n\n"
+            history_section = (
+                "# Recent History\n\n近期对话摘要：\n\n"
                 + "\n".join(f"- {line}" for line in history_lines)
             )
+        else:
+            history_section = ""
 
-        # ── 工具信息（含描述和使用指导）──
+        # 工具信息
         tool_registry = self.capability_registry.tools
+        tools_section = ""
         if hasattr(tool_registry, "list_by_layer"):
             layers = tool_registry.list_by_layer()
             if any(layers.values()):
                 layer_sections = []
+                layer_desc_map = {
+                    "builtin": "## Built-in Tools\n本地快速操作，用于文件系统和命令执行。",
+                    "mcp": "## MCP Tools\n外部 API 工具，用于地图、交通和实时数据。",
+                    "workflow": "## Workflow Tools\n复杂多步工作流，用于编排多个工具的任务。",
+                }
                 for layer_name, tools in layers.items():
                     if not tools:
                         continue
-                    layer_desc = {
-                        "builtin": "## Built-in Tools\nFast, local operations. Use these for file system access and command execution.",
-                        "mcp": "## MCP Tools\nExternal API tools. Use these for maps, transportation, and real-time data.",
-                        "workflow": "## Workflow Tools\nComplex multi-step workflows. Use these for tasks that require orchestrating multiple tools.",
-                    }.get(layer_name, f"## {layer_name}")
-
+                    layer_desc = layer_desc_map.get(layer_name, f"## {layer_name}")
                     tool_details = []
                     for tool_name in tools:
                         tool = tool_registry.get(tool_name)
-                        desc = tool.description[:80] if tool else ""
+                        desc = tool.description if tool else ""
                         tool_details.append(f"- **{tool_name}**: {desc}")
-
                     layer_sections.append(f"{layer_desc}\n\n" + "\n".join(tool_details))
-
                 if layer_sections:
-                    parts.append("# Available Tools\n\n" + "\n\n".join(layer_sections))
+                    tools_section = "# Available Tools\n\n" + "\n\n".join(layer_sections)
 
-        # ── 技能信息 ──
+        # 技能信息
+        skills_section = ""
         if hasattr(self.skill_manager, "list_skills") and self.skill_manager.list_skills():
             skill_summary = self.skill_manager.get_skill_summary()
             if skill_summary:
-                parts.append(f"""# Available Skills
+                skills_section = (
+                    "# Available Skills\n\n"
+                    "你可以使用以下技能。当用户的请求匹配某个技能时，"
+                    "**必须**先调用 `skill_view(name)` 加载完整指令后再执行。\n\n"
+                    f"{skill_summary}"
+                )
 
-You have access to the following skills. When a user's request matches a skill, you MUST call `skill_view(name)` to load its full instructions before proceeding. Do not attempt to use a skill without loading it first.
+        # agent.md 项目概述
+        agent_md_section = ""
+        agent_md_path = Path("agent.md")
+        if agent_md_path.exists():
+            content = agent_md_path.read_text(encoding="utf-8").strip()
+            if content:
+                agent_md_section = f"# Project Context\n\n{content}"
 
-{skill_summary}""")
+        # 变量替换
+        result = template.replace("{{workspace_section}}", workspace_section)
+        result = result.replace("{{memory_section}}", memory_section)
+        result = result.replace("{{history_section}}", history_section)
+        result = result.replace("{{tools_section}}", tools_section)
+        result = result.replace("{{skills_section}}", skills_section)
+        result = result.replace("{{agent_md_section}}", agent_md_section)
+        result = result.replace("{{current_time}}", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-        # ── 当前时间 ──
-        parts.append(f"# Current Time\n\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # 清理多余空行（空 section 留下的）
+        while "\n\n\n---\n\n" in result:
+            result = result.replace("\n\n\n---\n\n", "\n\n")
+        while "\n\n---\n\n\n" in result:
+            result = result.replace("\n\n---\n\n\n", "\n\n")
+        # 清理空 section（只有 --- 分隔符没有内容的段落）
+        lines = result.split("\n")
+        cleaned = []
+        skip_separator = False
+        for line in lines:
+            if line.strip() == "---":
+                # 检查前一段是否为空（只有分隔符，没有实质内容）
+                if cleaned and cleaned[-1].strip() == "":
+                    continue
+                skip_separator = False
+                cleaned.append(line)
+            else:
+                cleaned.append(line)
+        result = "\n".join(cleaned)
 
-        return "\n\n---\n\n".join(parts)
+        return result.strip()

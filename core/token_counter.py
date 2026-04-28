@@ -80,13 +80,8 @@ def fallback_estimate(text: str) -> int:
     total_chars = len(text)
 
     if total_chars > 0 and chinese_chars / total_chars > 0.3:
-        return int(total_chars / 1.5)
+        return int(total_chars / 2)
     return int(total_chars / 4)
 
 
-# 兼容旧接口
-def count_tokens(text: str, model: str = "gpt-4") -> int:
-    """计算文本的 Token 数量（兼容接口）"""
-    if not text:
-        return 0
-    return TokenCounter.estimate_tokens(text)
+

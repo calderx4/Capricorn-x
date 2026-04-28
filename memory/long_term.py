@@ -6,11 +6,9 @@ Long Term Memory - 长期记忆管理
 - 提供读写接口
 """
 
-from pathlib import Path
+import os
+import tempfile
 from loguru import logger
-
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.settings import WorkspaceConfig
 
@@ -48,14 +46,20 @@ class LongTermMemory:
             return ""
 
     def write(self, content: str) -> None:
-        """
-        写入长期记忆
-
-        Args:
-            content: 长期记忆内容
-        """
+        """原子写入长期记忆。"""
         try:
-            self.file_path.write_text(content, encoding="utf-8")
+            self.file_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(dir=self.file_path.parent, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.replace(tmp_path, self.file_path)
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
             logger.debug(f"Wrote long term memory: {len(content)} chars")
         except Exception as e:
             logger.error(f"Failed to write long term memory: {e}")

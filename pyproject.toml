@@ -41,6 +41,9 @@ tiktoken = [
 [project.scripts]
 capricorn = "run:main"
 
+[tool.setuptools.packages.find]
+include = ["agent*", "capabilities*", "config*", "core*", "memory*"]
+
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
