@@ -22,6 +22,7 @@ from pathlib import Path
 
 from core.utils import strip_thinking_tags
 from core import trace
+from core.prompt_utils import build_tools_section, build_skills_section, build_memory_section, clean_empty_sections
 
 
 class CapricornGraph:
@@ -37,6 +38,8 @@ class CapricornGraph:
         llm_client=None,
         sandbox: bool = True,
         max_iterations: int = 50,
+        exclude_tools: list = None,
+        system_prompt_override: str = None,
     ):
         self.capability_registry = capability_registry
         self.skill_manager = skill_manager
@@ -46,22 +49,28 @@ class CapricornGraph:
         self.llm_client = llm_client
         self.sandbox = sandbox
         self.max_iterations = max_iterations
+        self._exclude_tools = set(exclude_tools or [])
+        self.system_prompt_override = system_prompt_override
 
-        # 预绑定工具
+        # 预绑定工具（排除指定工具）
         if self.llm_client:
             tools = self.capability_registry.get_langchain_tools()
+            if self._exclude_tools:
+                tools = [t for t in tools if t.name not in self._exclude_tools]
             self._llm_with_tools = self.llm_client.bind_tools(tools)
         else:
             self._llm_with_tools = None
             logger.warning("LLM client not initialized")
 
-    async def run(self, user_input: str, thread_id: str = "default") -> str:
+    async def run(self, user_input: str, thread_id: str = "default", notifications: str = "") -> str:
         """运行 FC 循环"""
         logger.info(f"Running agent with thread_id: {thread_id}")
 
         session = self.session_manager.get_session(thread_id)
 
         system_prompt = self._build_system_prompt()
+        if notifications:
+            system_prompt += f"\n\n{notifications}"
         history_messages = session.get_history(max_messages=0)
 
         messages = [
@@ -218,6 +227,9 @@ class CapricornGraph:
         return content
 
     def _build_system_prompt(self) -> str:
+        if self.system_prompt_override:
+            return self.system_prompt_override
+
         template_path = Path(__file__).parent.parent / "config" / "prompts" / "system.md"
         template = template_path.read_text(encoding="utf-8")
 
@@ -225,7 +237,6 @@ class CapricornGraph:
             getattr(self.session_manager, "workspace", None), "root", "./workspace"
         )
 
-        # 工作区（sandbox 开关只控制是否限制在 workspace 内，不影响默认 cwd）
         sandbox_note = "（沙盒模式：路径限制在工作区内）" if self.sandbox else "（可访问工作区外的路径）"
         workspace_section = (
             f"# Workspace\n\n"
@@ -240,63 +251,14 @@ class CapricornGraph:
             f"- 操作前先用 `list_files` 查看工作区结构。"
         )
 
-        # 长期记忆
-        memory_content = self.long_term_memory.read()
-        if memory_content:
-            memory_section = (
-                "# Long-term Memory\n\n"
-                "以下包含需要始终记住的重要事实、偏好和上下文。\n\n"
-                f"{memory_content}"
-            )
-        else:
-            memory_section = ""
-
         # 历史摘要
-        history_lines = self.history_log.read(limit=10)
+        history_lines = self.history_log.read(limit=10) if self.history_log else []
+        history_section = ""
         if history_lines:
             history_section = (
                 "# Recent History\n\n近期对话摘要：\n\n"
                 + "\n".join(f"- {line}" for line in history_lines)
             )
-        else:
-            history_section = ""
-
-        # 工具信息
-        tool_registry = self.capability_registry.tools
-        tools_section = ""
-        if hasattr(tool_registry, "list_by_layer"):
-            layers = tool_registry.list_by_layer()
-            if any(layers.values()):
-                layer_sections = []
-                layer_desc_map = {
-                    "builtin": "## Built-in Tools\n本地快速操作，用于文件系统和命令执行。",
-                    "mcp": "## MCP Tools\n外部 API 工具，用于地图、交通和实时数据。",
-                    "workflow": "## Workflow Tools\n复杂多步工作流，用于编排多个工具的任务。",
-                }
-                for layer_name, tools in layers.items():
-                    if not tools:
-                        continue
-                    layer_desc = layer_desc_map.get(layer_name, f"## {layer_name}")
-                    tool_details = []
-                    for tool_name in tools:
-                        tool = tool_registry.get(tool_name)
-                        desc = tool.description if tool else ""
-                        tool_details.append(f"- **{tool_name}**: {desc}")
-                    layer_sections.append(f"{layer_desc}\n\n" + "\n".join(tool_details))
-                if layer_sections:
-                    tools_section = "# Available Tools\n\n" + "\n\n".join(layer_sections)
-
-        # 技能信息
-        skills_section = ""
-        if hasattr(self.skill_manager, "list_skills") and self.skill_manager.list_skills():
-            skill_summary = self.skill_manager.get_skill_summary()
-            if skill_summary:
-                skills_section = (
-                    "# Available Skills\n\n"
-                    "你可以使用以下技能。当用户的请求匹配某个技能时，"
-                    "**必须**先调用 `skill_view(name)` 加载完整指令后再执行。\n\n"
-                    f"{skill_summary}"
-                )
 
         # agent.md 项目概述
         agent_md_section = ""
@@ -308,31 +270,11 @@ class CapricornGraph:
 
         # 变量替换
         result = template.replace("{{workspace_section}}", workspace_section)
-        result = result.replace("{{memory_section}}", memory_section)
+        result = result.replace("{{memory_section}}", build_memory_section(self.long_term_memory))
         result = result.replace("{{history_section}}", history_section)
-        result = result.replace("{{tools_section}}", tools_section)
-        result = result.replace("{{skills_section}}", skills_section)
+        result = result.replace("{{tools_section}}", build_tools_section(self.capability_registry))
+        result = result.replace("{{skills_section}}", build_skills_section(self.skill_manager))
         result = result.replace("{{agent_md_section}}", agent_md_section)
         result = result.replace("{{current_time}}", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-        # 清理多余空行（空 section 留下的）
-        while "\n\n\n---\n\n" in result:
-            result = result.replace("\n\n\n---\n\n", "\n\n")
-        while "\n\n---\n\n\n" in result:
-            result = result.replace("\n\n---\n\n\n", "\n\n")
-        # 清理空 section（只有 --- 分隔符没有内容的段落）
-        lines = result.split("\n")
-        cleaned = []
-        skip_separator = False
-        for line in lines:
-            if line.strip() == "---":
-                # 检查前一段是否为空（只有分隔符，没有实质内容）
-                if cleaned and cleaned[-1].strip() == "":
-                    continue
-                skip_separator = False
-                cleaned.append(line)
-            else:
-                cleaned.append(line)
-        result = "\n".join(cleaned)
-
-        return result.strip()
+        return clean_empty_sections(result)

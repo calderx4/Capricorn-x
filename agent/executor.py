@@ -7,7 +7,6 @@ Executor - Agent 执行器
 - 资源管理
 """
 
-import asyncio
 from typing import Optional
 from loguru import logger
 from langchain_core.messages import AIMessage
@@ -44,20 +43,24 @@ class CapricornAgent:
         self.session_manager: Optional[SessionManager] = None
         self.long_term_memory: Optional[LongTermMemory] = None
         self.history_log: Optional[HistoryLog] = None
+        self._cron_scheduler = None
+        self._notification_bus = None
 
     @classmethod
-    async def create(cls, config: Config, config_path: str = None) -> "CapricornAgent":
+    async def create(cls, config: Config, config_path: str = None, notification_bus=None) -> "CapricornAgent":
         """
         工厂方法：创建并初始化 Agent
 
         Args:
             config: 配置对象
             config_path: 配置文件路径（用于 SessionManager 初始化 LLM）
+            notification_bus: 通知总线（可选）
 
         Returns:
             初始化后的 Agent
         """
         agent = cls(config, config_path)
+        agent._notification_bus = notification_bus
         await agent.initialize()
         return agent
 
@@ -92,7 +95,24 @@ class CapricornAgent:
         # 6. 初始化历史日志
         self.history_log = HistoryLog(self.config.workspace)
 
-        # 7. 构建图
+        # 7. 初始化 Cron 调度器（在构建图之前，确保 cron 工具已注册）
+        if self.config.cron.enabled:
+            from agent.scheduler import CronScheduler
+            from capabilities.tools.builtin.extensions.cron_tools import CronTool
+
+            self._cron_scheduler = CronScheduler(self.config)
+            self._cron_scheduler.initialize(
+                llm_client=self.llm_client,
+                capability_registry=self.capability_registry,
+                skill_manager=self.skill_manager,
+                long_term_memory=self.long_term_memory,
+                notification_bus=self._notification_bus,
+            )
+
+            cron_tool = CronTool(self._cron_scheduler)
+            self.capability_registry.tools.register(cron_tool, layer="builtin")
+
+        # 8. 构建图（绑定所有工具到 LLM，包括 cron）
         self.graph = CapricornGraph(
             self.capability_registry,
             self.skill_manager,
@@ -185,8 +205,34 @@ class CapricornAgent:
         # 对话开始前：检查并同步整合记忆（阻塞式）
         await self._check_and_consolidate_memory(thread_id)
 
+        # 获取未读通知，注入到本次对话
+        notifications = ""
+        unread_ids = []
+        if self._notification_bus:
+            unread = self._notification_bus.get_unread()
+            if unread:
+                lines = []
+                for n in unread:
+                    d = n["data"]
+                    ts = n["timestamp"][:16]
+                    name = d.get("job_name", "未命名任务")
+                    msg = d.get("message", "")[:300]
+                    status = d.get("status", "")
+                    icon = "✅" if status == "success" else "❌"
+                    lines.append(f"{icon} [{ts}] {name}: {msg}")
+                notifications = (
+                    "# 未读通知\n\n"
+                    "以下是你之前设定的定时任务执行结果，请在回复中视情况自然提及：\n\n"
+                    + "\n".join(lines)
+                )
+                unread_ids = [n["id"] for n in unread]
+
         # 执行对话
-        response = await self.graph.run(user_input, thread_id)
+        response = await self.graph.run(user_input, thread_id, notifications=notifications)
+
+        # 对话成功后标记通知已读
+        if unread_ids:
+            self._notification_bus.mark_read(unread_ids)
 
         return response
 

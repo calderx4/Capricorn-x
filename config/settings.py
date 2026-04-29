@@ -83,6 +83,23 @@ class MemoryConfig(BaseModel):
     context_budget: int = Field(default=16000, gt=0)
 
 
+class CronConfig(BaseModel):
+    """Cron 调度配置"""
+
+    enabled: bool = False
+    tick_interval: int = Field(default=60, gt=0)
+    output_dir: str = "cron/output"
+    default_timeout: int = Field(default=300, gt=0)
+    fresh_session: bool = False
+
+
+class GatewayConfig(BaseModel):
+    """Gateway HTTP 配置"""
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=8080, gt=0)
+
+
 class Config(BaseModel):
     """主配置类"""
 
@@ -93,6 +110,8 @@ class Config(BaseModel):
     skills: Dict[str, Any] = Field(default_factory=dict)
     agent: Dict[str, Any] = Field(default_factory=dict)
     blocked_commands: list[str] = Field(default_factory=list)
+    cron: CronConfig = Field(default_factory=CronConfig)
+    gateway: GatewayConfig = Field(default_factory=GatewayConfig)
 
     @classmethod
     def load(cls, config_path: str) -> "Config":
