@@ -17,6 +17,8 @@ from core.sandbox import check_path, check_command
 class ExecTool(BaseTool):
     """Shell 命令执行工具"""
 
+    MAX_TIMEOUT = 120  # 单条命令最长 120 秒
+
     def __init__(self, workspace_root: str = "./workspace", sandbox: bool = True,
                  blocked_commands: List[str] = None):
         self._workspace_root = workspace_root
@@ -38,11 +40,8 @@ class ExecTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Execute a shell command on the system. "
-            "Returns stdout, stderr, and exit code. "
-            "Supports an optional working directory (cwd) and timeout in seconds. "
-            "Use this for running scripts, installing packages, git operations, "
-            "or any system-level tasks that require shell access."
+            "执行 shell 命令，返回 stdout/stderr/exit code。适用场景：运行脚本、安装包、git 操作、编译、测试。\n"
+            "参数：cwd（工作目录）、timeout（超时秒数，默认30，最大120）。"
         )
 
     @property
@@ -68,6 +67,7 @@ class ExecTool(BaseTool):
         }
 
     async def execute(self, command: str, cwd: str = None, timeout: int = 30) -> str:
+        timeout = min(max(timeout, 1), self.MAX_TIMEOUT)
         # 危险命令检查（独立于 sandbox）
         allowed, reason = check_command(command, self._blocked_commands)
         if not allowed:

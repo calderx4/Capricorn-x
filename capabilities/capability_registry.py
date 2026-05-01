@@ -104,7 +104,7 @@ class CapabilityRegistry:
             logger.debug(f"Auto-discovered workflow: {wf.name}")
 
     async def _register_skill_tools(self, skill_manager):
-        from capabilities.skills.skill_tool import SkillViewTool
+        from capabilities.tools.builtin.extensions.skill_tool import SkillViewTool
 
         if skill_manager.get_available_skills():
             tool = SkillViewTool(skill_manager)

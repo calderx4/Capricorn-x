@@ -10,6 +10,9 @@ from typing import Any, Dict
 from loguru import logger
 
 from core.base_tool import BaseTool
+from core.utils import atomic_write
+
+_STATUS_ICONS = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
 
 
 class TodoTool(BaseTool):
@@ -29,10 +32,15 @@ class TodoTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "管理任务列表，用于复杂多步任务的规划和进度跟踪。"
-            "action='add' 添加任务，action='update' 更新状态（pending/in_progress/completed），"
-            "action='list' 查看所有任务，action='clear' 清空任务列表。"
-            "复杂任务先用 add 规划步骤，再逐步执行。"
+            "任务规划与进度跟踪工具，适用于复杂多步任务。\n"
+            "用法：\n"
+            "  add — 添加任务（content 必填），返回新任务 ID\n"
+            "  list — 查看所有任务及状态（[ ]未开始 / [~]进行中 / [x]已完成）\n"
+            "  update — 更新任务状态（task_id + status 必填）\n"
+            "  get — 查看单个任务详情（task_id 必填）\n"
+            "  delete — 删除任务（task_id 必填）\n"
+            "  clear — 清空任务列表\n"
+            "建议：复杂任务先 add 规划步骤，逐步执行时每步 update in_progress，完成后 update completed。"
         )
 
     @property
@@ -42,7 +50,7 @@ class TodoTool(BaseTool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["add", "update", "list", "clear"],
+                    "enum": ["add", "update", "list", "get", "delete", "clear"],
                     "description": "操作类型",
                 },
                 "content": {
@@ -51,7 +59,7 @@ class TodoTool(BaseTool):
                 },
                 "task_id": {
                     "type": "integer",
-                    "description": "任务 ID（update 时必填）",
+                    "description": "任务 ID（update/get/delete 时必填）",
                 },
                 "status": {
                     "type": "string",
@@ -89,9 +97,27 @@ class TodoTool(BaseTool):
                     return "任务列表为空"
                 lines = []
                 for t in todos:
-                    icon = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}[t["status"]]
+                    icon = _STATUS_ICONS[t["status"]]
                     lines.append(f"  #{t['id']} {icon} {t['content']}")
                 return "任务列表：\n" + "\n".join(lines)
+
+            elif action == "get":
+                if task_id is None:
+                    return "Error: get 需要提供 task_id"
+                for t in todos:
+                    if t["id"] == task_id:
+                        icon = _STATUS_ICONS[t["status"]]
+                        return f"#{t['id']} {icon} {t['content']}"
+                return f"Error: 未找到任务 #{task_id}"
+
+            elif action == "delete":
+                if task_id is None:
+                    return "Error: delete 需要提供 task_id"
+                new_todos = [t for t in todos if t["id"] != task_id]
+                if len(new_todos) == len(todos):
+                    return f"Error: 未找到任务 #{task_id}"
+                self._save(new_todos)
+                return f"已删除任务 #{task_id}"
 
             elif action == "clear":
                 self._save([])
@@ -108,12 +134,12 @@ class TodoTool(BaseTool):
             return []
         try:
             return json.loads(self._todo_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, Exception):
+        except Exception:
             return []
 
     def _save(self, todos: list):
         self._todo_path.parent.mkdir(parents=True, exist_ok=True)
-        self._todo_path.write_text(
+        atomic_write(
+            self._todo_path,
             json.dumps(todos, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )

@@ -14,6 +14,8 @@ from core.base_tool import BaseTool
 class SkillViewTool(BaseTool):
     """技能查看工具 - LLM 通过此工具获取技能的完整指令"""
 
+    auto_discover = False  # 由 _register_skill_tools 手动注册，不走自动发现
+
     def __init__(self, skill_manager):
         self._skill_manager = skill_manager
 
@@ -29,9 +31,9 @@ class SkillViewTool(BaseTool):
 
         names = ", ".join(available.keys())
         return (
-            "Load the full content of a skill by name. "
-            "Use this when a user's request matches a skill. "
-            f"Available skills: {names}"
+            "按需加载技能（Skill）的完整指令。技能是针对特定领域（前端开发、文档生成等）的专业化指导包。\n"
+            "触发场景：用户请求匹配某个技能领域时，必须先调用此工具加载完整指令后再执行任务。\n"
+            f"可用技能: {names}"
         )
 
     @property
@@ -41,7 +43,7 @@ class SkillViewTool(BaseTool):
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "The name of the skill to load",
+                    "description": "要加载的技能名称",
                 },
             },
             "required": ["name"],
