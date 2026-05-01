@@ -13,6 +13,8 @@ import time
 from datetime import datetime
 from typing import Dict
 
+TOOL_TIMEOUT = 300  # 单个工具执行全局超时 5 分钟
+
 from langchain_core.messages import (
     HumanMessage, AIMessage, SystemMessage, ToolMessage, BaseMessage,
 )
@@ -135,6 +137,9 @@ class CapricornGraph:
                 for tm in tool_messages:
                     session.add_message("tool", tm.content, tool_call_id=tm.tool_call_id)
 
+                # 每轮写盘（防崩溃丢消息）
+                self.session_manager.save_session(session)
+
                 round_latency = int((time.monotonic() - round_start_ts) * 1000)
                 trace.round_end(i + 1, len(tool_names), round_latency)
 
@@ -168,11 +173,19 @@ class CapricornGraph:
             name, args = call["name"], call["args"]
             start = time.monotonic()
             try:
-                result = await self.capability_registry.tools.execute(name, args)
+                result = await asyncio.wait_for(
+                    self.capability_registry.tools.execute(name, args),
+                    timeout=TOOL_TIMEOUT,
+                )
                 content = str(result)
                 latency = int((time.monotonic() - start) * 1000)
                 logger.info(f"  {name} -> {content[:100]}")
                 trace.tool_call(round, name, args, latency, "ok")
+            except asyncio.TimeoutError:
+                content = f"Error: Tool '{name}' execution timed out after {TOOL_TIMEOUT} seconds"
+                latency = int((time.monotonic() - start) * 1000)
+                logger.error(f"Tool {name} timed out")
+                trace.tool_call(round, name, args, latency, "timeout")
             except Exception as e:
                 content = f"Error: {e}"
                 latency = int((time.monotonic() - start) * 1000)
@@ -260,7 +273,7 @@ class CapricornGraph:
                 + "\n".join(f"- {line}" for line in history_lines)
             )
 
-        # agent.md 项目概述
+        # agent.md 项目概述（CWD 相对：跟随启动目录，允许多项目共享同一 agent 进程）
         agent_md_section = ""
         agent_md_path = Path("agent.md")
         if agent_md_path.exists():

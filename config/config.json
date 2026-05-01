@@ -17,11 +17,11 @@
 
   "llm": {
       "provider": "openai",
-      "model": "MiniMax-M2.7",
-      "api_key": "${MINIMAX_API_KEY}",
-      "api_base": "https://api.minimaxi.com/v1",
+      "model": "deepseek-v4-pro",
+      "api_key": "${DEEPSEEK_API_KEY}",
+      "api_base": "https://api.deepseek.com",
       "temperature": 0.0,
-      "max_tokens": 64000
+      "max_tokens": 1280000
     },
 
   "mcp_servers": {
@@ -55,7 +55,7 @@
     "enabled": true,
     "message_threshold": 120,
     "messages_to_keep": 60,
-    "token_threshold": 100000,
+    "token_threshold": 800000,
     "context_budget": 1280000
   },
 

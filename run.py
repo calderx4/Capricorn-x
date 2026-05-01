@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Run - 启动入口
 
@@ -121,8 +120,6 @@ class CapricornCLI:
                     "--server.headless", "true",
                     "--browser.gatherUsageStats", "false",
                 ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
             )
             print(f"✓ WebUI: http://{self.config.gateway.host}:{webui_port}")
 

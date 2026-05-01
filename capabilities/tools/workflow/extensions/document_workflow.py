@@ -4,7 +4,7 @@ Document Creation Workflow - 文档创建工作流
 示例工作流，展示如何组合多个工具完成复杂任务。
 """
 
-from typing import Any, List
+from typing import Any, Dict, List
 from datetime import datetime
 
 from core.base_workflow import BaseWorkflow
@@ -19,11 +19,25 @@ class DocumentCreationWorkflow(BaseWorkflow):
 
     @property
     def description(self) -> str:
-        return "Create a structured document with metadata and formatting."
+        return "创建结构化文档，支持 Markdown 格式和元数据（标题/作者/标签/时间戳）。\n参数：title（必填）、content（必填）、path（保存路径，默认 ./documents/{title}.md）、author、tags。"
 
     @property
     def required_tools(self) -> List[str]:
         return ["write_file"]
+
+    @property
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "文档标题（必填）"},
+                "content": {"type": "string", "description": "文档内容（必填）"},
+                "path": {"type": "string", "description": "保存路径，可选，默认 ./documents/{title}.md"},
+                "author": {"type": "string", "description": "作者，可选，默认 Capricorn Agent"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "标签列表，可选"},
+            },
+            "required": ["title", "content"],
+        }
 
     async def execute(self, tools: Any, **kwargs: Any) -> Any:
         """

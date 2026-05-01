@@ -11,6 +11,7 @@ from loguru import logger
 
 from core.base_tool import BaseTool
 from core.sandbox import check_path
+from core.utils import atomic_write
 
 
 def _resolve_path(path: str, workspace_root: str, sandbox: bool) -> Path:
@@ -45,9 +46,8 @@ class ReadFileTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Read the contents of a file from the local filesystem. "
-            "Use this when you need to inspect file contents, check configurations, "
-            "or read user-provided data. Returns the full text content of the file."
+            "读取文件完整内容（纯文本）。适用场景：查看配置、代码检查、数据分析。\n"
+            "限制：最大 10MB，超过报错。返回文件原始文本内容。"
         )
 
     @property
@@ -105,10 +105,8 @@ class WriteFileTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Write content to a file on the local filesystem. "
-            "Creates parent directories automatically if they don't exist. "
-            "Overwrites existing files. Use this to save results, create documents, "
-            "or write generated content."
+            "新建或覆盖文件，自动创建父目录。适用场景：保存结果、生成代码、写文档。\n"
+            "注意：直接覆盖原内容，无备份；如只需小改用 edit_file。"
         )
 
     @property
@@ -133,7 +131,7 @@ class WriteFileTool(BaseTool):
             file_path = _resolve_path(path, self._workspace_root, self._sandbox)
 
             file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_text(content, encoding="utf-8")
+            atomic_write(file_path, content)
             logger.debug(f"Wrote file: {path} ({len(content)} chars)")
 
             return f"Successfully wrote to {path}"
@@ -163,10 +161,9 @@ class EditFileTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Perform exact string replacement in a file. "
-            "Finds `old_string` and replaces it with `new_string`. "
-            "Fails if old_string is not found or appears more than once (unless replace_all=true). "
-            "Prefer this over write_file for making small, targeted changes to existing files."
+            "对文件做精确字符串替换。找到 old_string 替换为 new_string。\n"
+            "限制：old_string 必须唯一（出现多次需 replace_all=true 或加更多上下文）。\n"
+            "适用：修改配置、增删代码行、修复文字 — 小改动首选。"
         )
 
     @property
@@ -214,7 +211,7 @@ class EditFileTool(BaseTool):
                 return f"Error: old_string appears {count} times in {path}. Use replace_all=true to replace all occurrences, or provide more surrounding context to make it unique."
 
             new_content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
-            file_path.write_text(new_content, encoding="utf-8")
+            atomic_write(file_path, new_content)
             logger.debug(f"Edited file: {path} ({count} replacement(s))")
             return f"Successfully edited {path} ({count} replacement(s))"
 
@@ -243,9 +240,7 @@ class ListFilesTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "List files and subdirectories in a directory. "
-            "Use this to explore the workspace structure, find files, "
-            "or check what resources are available before reading."
+            "列出目录下的文件（[FILE]）和子目录（[DIR]/）。适用场景：探索目录结构、找文件、查看可用资源。"
         )
 
     @property

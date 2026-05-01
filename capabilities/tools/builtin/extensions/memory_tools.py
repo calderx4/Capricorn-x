@@ -4,7 +4,6 @@ Memory Tools - 记忆操作工具
 让 LLM 主动更新长期记忆和搜索历史记录。
 """
 
-from datetime import datetime
 from typing import Any, Dict, List
 from loguru import logger
 
@@ -32,8 +31,8 @@ class MemoryUpdateTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "主动更新长期记忆（MEMORY.md）。用于记住用户偏好、项目事实、重要决策。"
-            "mode='append' 追加内容，mode='replace' 替换全部内容。默认追加。"
+            "主动更新长期记忆（MEMORY.md）。适用场景：记住用户偏好、项目事实、重要决策。\n"
+            "mode=append 时追加内容，mode=replace 时替换全部内容。默认 append。"
         )
 
     @property
@@ -86,8 +85,8 @@ class HistorySearchTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "搜索历史对话记录（HISTORY.md）。支持关键词和时间范围过滤。"
-            "用于查找过去的对话、用户偏好、任务记录。"
+            "搜索历史对话记录（HISTORY.md）。适用场景：找过去的对话、用户偏好、任务记录。\n"
+            "参数：query（关键词）、since/until（时间范围 YYYY-MM-DD）、limit（返回条数上限，默认5）。"
         )
 
     @property

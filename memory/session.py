@@ -8,8 +8,6 @@ Session Manager - 会话管理
 """
 
 import json
-import os
-import tempfile
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
@@ -17,23 +15,7 @@ from datetime import datetime
 from loguru import logger
 
 from config.settings import WorkspaceConfig
-from core.utils import strip_thinking_tags
-
-
-def _atomic_write(path: Path, content: str) -> None:
-    """原子写入：先写临时文件，再 rename 替换。防止崩溃时截断。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(tmp_path, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+from core.utils import strip_thinking_tags, atomic_write
 
 
 def _serialize_message(msg: Dict[str, Any]) -> str:
@@ -157,8 +139,7 @@ class SessionManager:
                 line = _serialize_message(msg)
                 if line:
                     lines.append(line)
-            _atomic_write(session_path, "".join(lines))
-
+            atomic_write(session_path, "".join(lines))
             session.updated_at = datetime.now()
             logger.debug(f"Saved session: {session.thread_id} ({len(session.messages)} messages)")
 
@@ -223,7 +204,7 @@ class SessionManager:
             line = _serialize_message(msg)
             if line:
                 lines.append(line)
-        _atomic_write(session_path, "".join(lines))
+        atomic_write(session_path, "".join(lines))
         self._sessions.pop(thread_id, None)
 
     def clear_session(self, thread_id: str) -> None:

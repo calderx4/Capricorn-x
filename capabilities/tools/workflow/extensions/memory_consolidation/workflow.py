@@ -105,23 +105,32 @@ class MemoryConsolidationWorkflow(BaseWorkflow):
 
     def get_messages_to_consolidate(self, session_data: Dict) -> List[Dict]:
         messages = session_data.get("messages", [])
+        n = len(messages)
 
-        if len(messages) >= self.MAX_MESSAGES_BEFORE_CONSOLIDATION:
-            if len(messages) <= self.MESSAGES_TO_KEEP:
-                return []
-            messages_to_consolidate = messages[:-self.MESSAGES_TO_KEEP]
-            return messages_to_consolidate
+        if n <= self.MESSAGES_TO_KEEP:
+            return []
 
+        # 消息数触发：按条数保留
+        if n >= self.MAX_MESSAGES_BEFORE_CONSOLIDATION:
+            return messages[:-self.MESSAGES_TO_KEEP]
+
+        # Token 数触发：凑 tokens，同时强制保留 MESSAGES_TO_KEEP 条
         token_count = TokenCounter.count_messages_tokens(messages)
         if token_count >= self.MAX_TOKENS_BEFORE_CONSOLIDATION:
             target_tokens = int(token_count * (1 - self.TOKENS_TO_CONSOLIDATION_RATIO))
+            # 必须保留的最后 MESSAGES_TO_KEEP 条不参与累加
+            kept_tail = messages[-self.MESSAGES_TO_KEEP:]
+            tail_tokens = TokenCounter.count_messages_tokens(kept_tail)
+            budget = target_tokens - tail_tokens
+            if budget <= 0:
+                return messages[:-self.MESSAGES_TO_KEEP]
             accumulated = 0
             for i, msg in enumerate(messages):
                 accumulated += TokenCounter.count_messages_tokens([msg])
-                if accumulated > target_tokens:
+                if accumulated > budget:
                     return messages[:max(1, i)]
 
-        return messages[:max(1, len(messages) // 2)]
+        return messages[:-self.MESSAGES_TO_KEEP]
 
     async def execute(self, tools: Any = None, **kwargs) -> Any:
         session_data = kwargs.get("session_data", {})

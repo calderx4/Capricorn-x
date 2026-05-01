@@ -5,9 +5,9 @@ Prompt 工具函数 — tools / skills / memory section 构建
 """
 
 LAYER_DESC_MAP = {
-    "builtin": "## Built-in Tools\n本地快速操作，用于文件系统和命令执行。",
-    "mcp": "## MCP Tools\n外部 API 工具，用于地图、交通和实时数据。",
-    "workflow": "## Workflow Tools\n复杂多步工作流，用于编排多个工具的任务。",
+    "builtin": "## Built-in Tools\n本地基础能力 — 文件操作、命令执行、任务规划、记忆管理。",
+    "mcp": "## MCP Tools\n外部服务集成（地图、交通等），按需调用。",
+    "workflow": "## Workflow Tools\n复杂多步编排任务，调用多个工具协作完成。",
 }
 
 
@@ -34,7 +34,10 @@ def build_tools_section(capability_registry) -> str:
 
 
 def build_skills_section(skill_manager) -> str:
-    if not skill_manager or not hasattr(skill_manager, "list_skills") or not skill_manager.list_skills():
+    if not skill_manager or not hasattr(skill_manager, "list_skills"):
+        return ""
+    skills = skill_manager.list_skills()
+    if not skills:
         return ""
     summary = skill_manager.get_skill_summary()
     if not summary:

@@ -4,7 +4,7 @@ Test Workflow - 自检工作流
 验证 Tool 注册、文件读写、Shell 执行等核心链路是否正常。
 """
 
-from typing import Any, List
+from typing import Any, Dict, List
 from datetime import datetime
 
 from core.base_workflow import BaseWorkflow
@@ -19,11 +19,15 @@ class TestWorkflow(BaseWorkflow):
 
     @property
     def description(self) -> str:
-        return "Run a self-test to verify core tools (read_file, write_file, exec) are working."
+        return "自检工作流，验证核心工具（write_file、read_file、exec）是否正常工作。无需参数，直接执行。\n参数：无需参数（忽略任何传入参数）。"
 
     @property
     def required_tools(self) -> List[str]:
         return ["read_file", "write_file", "exec"]
+
+    @property
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {"type": "object", "properties": {}, "required": []}
 
     async def execute(self, tools: Any, **kwargs: Any) -> Any:
         results = []

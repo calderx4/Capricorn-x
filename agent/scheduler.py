@@ -22,10 +22,11 @@ from loguru import logger
 
 from config.settings import Config, WorkspaceConfig
 from core.prompt_utils import build_tools_section, build_skills_section, build_memory_section, clean_empty_sections
+from core.utils import atomic_write
 
 
 def _short_id() -> str:
-    return uuid.uuid4().hex[:6]
+    return uuid.uuid4().hex[:8]
 
 
 def _now_iso() -> str:
@@ -96,11 +97,16 @@ def calc_next_run(schedule: str) -> str:
 
 def _infer_type(schedule: str) -> str:
     """从 schedule 格式推断任务类型"""
-    if schedule.startswith("every"):
-        return "recurring"
-    if " " in schedule:
-        return "recurring"
-    return "once"
+    if re.match(r"^\d+[mhd]$", schedule):
+        return "once"
+    if re.match(r"^\d{1,2}:\d{2}$", schedule):
+        return "recurring"  # "13:25" → calc_next_run 生成每日 cron
+    try:
+        datetime.fromisoformat(schedule)
+        return "once"
+    except ValueError:
+        pass
+    return "recurring"
 
 
 class CronScheduler:
@@ -120,6 +126,8 @@ class CronScheduler:
 
         self._lock_fd = None
         self._initialized = False
+        self._lock = asyncio.Lock()
+        self._running = False
 
         # 复用主 Agent 的组件（由 initialize 注入）
         self._llm_client = None
@@ -137,42 +145,43 @@ class CronScheduler:
         self._initialized = True
         logger.info("CronScheduler initialized with shared agent components")
 
-    # ── 任务管理 ──────────────────────────────────────
+    # ── 任务管理（async，受 asyncio.Lock 保护）──────────
 
-    def create_job(self, **kwargs) -> dict:
+    async def create_job(self, **kwargs) -> dict:
         """创建任务，返回 job dict"""
-        schedule = kwargs.get("schedule", "every 1h")
-        name = kwargs.get("name", "unnamed")
-        job_id = _short_id()
+        async with self._lock:
+            schedule = kwargs.get("schedule", "every 1h")
+            name = kwargs.get("name", "unnamed")
+            job_id = _short_id()
 
-        job_type = kwargs.get("type") or _infer_type(schedule)
-        workdir_name = re.sub(r"[^\w-]", "_", name)
-        job = {
-            "id": job_id,
-            "name": name,
-            "type": job_type,
-            "schedule": schedule,
-            "prompt": kwargs.get("prompt", ""),
-            "fresh_session": kwargs.get("fresh_session", self.config.cron.fresh_session),
-            "system_prompt": kwargs.get("system_prompt"),
-            "workdir": str(self.workspaces_dir / workdir_name),
-            "next_run_at": calc_next_run(schedule),
-            "status": "active",
-            "created_at": _now_iso(),
-            "last_run_at": None,
-            "last_run_status": None,
-            "repeat": kwargs.get("repeat"),
-            "end_at": kwargs.get("end_at"),
-            "tags": kwargs.get("tags", []),
-        }
+            job_type = kwargs.get("type") or _infer_type(schedule)
+            workdir_name = re.sub(r"[^\w-]", "_", name)
+            job = {
+                "id": job_id,
+                "name": name,
+                "type": job_type,
+                "schedule": schedule,
+                "prompt": kwargs.get("prompt", ""),
+                "fresh_session": kwargs.get("fresh_session", self.config.cron.fresh_session),
+                "system_prompt": kwargs.get("system_prompt"),
+                "workdir": str(self.workspaces_dir / workdir_name),
+                "next_run_at": calc_next_run(schedule),
+                "status": "active",
+                "created_at": _now_iso(),
+                "last_run_at": None,
+                "last_run_status": None,
+                "repeat": kwargs.get("repeat"),
+                "end_at": kwargs.get("end_at"),
+                "tags": kwargs.get("tags", []),
+            }
 
-        jobs = self._load_jobs()
-        jobs.append(job)
-        self._save_jobs(jobs)
+            jobs = self._load_jobs()
+            jobs.append(job)
+            self._save_jobs(jobs)
 
-        Path(job["workdir"]).mkdir(parents=True, exist_ok=True)
-        logger.info(f"Created cron job: {job_id} ({name}, type={job_type})")
-        return job
+            Path(job["workdir"]).mkdir(parents=True, exist_ok=True)
+            logger.info(f"Created cron job: {job_id} ({name}, type={job_type})")
+            return job
 
     def list_jobs(self) -> List[dict]:
         return self._load_jobs()
@@ -183,52 +192,66 @@ class CronScheduler:
                 return job
         return None
 
-    def update_job(self, job_id: str, **kwargs) -> Optional[dict]:
-        jobs = self._load_jobs()
-        for job in jobs:
-            if job["id"] == job_id:
-                for k, v in kwargs.items():
-                    if k in ("type", "end_at") or (v is not None and k in job):
-                        job[k] = v
-                if "schedule" in kwargs:
-                    job["next_run_at"] = calc_next_run(job["schedule"])
-                self._save_jobs(jobs)
-                logger.info(f"Updated cron job: {job_id}")
-                return job
-        return None
+    async def update_job(self, job_id: str, **kwargs) -> Optional[dict]:
+        async with self._lock:
+            jobs = self._load_jobs()
+            for job in jobs:
+                if job["id"] == job_id:
+                    for k, v in kwargs.items():
+                        if k in ("type", "end_at") or (v is not None and k in job):
+                            job[k] = v
+                    if "schedule" in kwargs:
+                        job["next_run_at"] = calc_next_run(job["schedule"])
+                    self._save_jobs(jobs)
+                    logger.info(f"Updated cron job: {job_id}")
+                    return job
+            return None
 
-    def pause_job(self, job_id: str) -> Optional[dict]:
-        return self._set_status(job_id, "paused")
+    async def pause_job(self, job_id: str) -> Optional[dict]:
+        async with self._lock:
+            jobs = self._load_jobs()
+            for job in jobs:
+                if job["id"] == job_id:
+                    job["status"] = "paused"
+                    self._save_jobs(jobs)
+                    return job
+            return None
 
-    def resume_job(self, job_id: str) -> Optional[dict]:
-        job = self._set_status(job_id, "active")
-        if job:
-            job["next_run_at"] = calc_next_run(job["schedule"])
-            self._save_jobs(self._load_jobs())
-        return job
-
-    def remove_job(self, job_id: str) -> bool:
-        jobs = self._load_jobs()
-        before = len(jobs)
-        jobs = [j for j in jobs if j["id"] != job_id]
-        if len(jobs) < before:
-            self._save_jobs(jobs)
-            logger.info(f"Removed cron job: {job_id}")
-            return True
-        return False
-
-    def run_job_now(self, job_id: str) -> Optional[dict]:
-        """立即触发一次任务执行"""
-        jobs = self._load_jobs()
-        for job in jobs:
-            if job["id"] == job_id:
-                job["next_run_at"] = _now_iso()
-                if job["status"] == "paused":
+    async def resume_job(self, job_id: str) -> Optional[dict]:
+        async with self._lock:
+            jobs = self._load_jobs()
+            for job in jobs:
+                if job["id"] == job_id:
                     job["status"] = "active"
+                    job["next_run_at"] = calc_next_run(job["schedule"])
+                    self._save_jobs(jobs)
+                    return job
+            return None
+
+    async def remove_job(self, job_id: str) -> bool:
+        async with self._lock:
+            jobs = self._load_jobs()
+            before = len(jobs)
+            jobs = [j for j in jobs if j["id"] != job_id]
+            if len(jobs) < before:
                 self._save_jobs(jobs)
-                logger.info(f"Triggered immediate run for job: {job_id}")
-                return job
-        return None
+                logger.info(f"Removed cron job: {job_id}")
+                return True
+            return False
+
+    async def run_job_now(self, job_id: str) -> Optional[dict]:
+        """立即触发一次任务执行"""
+        async with self._lock:
+            jobs = self._load_jobs()
+            for job in jobs:
+                if job["id"] == job_id:
+                    job["next_run_at"] = _now_iso()
+                    if job["status"] == "paused":
+                        job["status"] = "active"
+                    self._save_jobs(jobs)
+                    logger.info(f"Triggered immediate run for job: {job_id}")
+                    return job
+            return None
 
     # ── Tick 循环 ─────────────────────────────────────
 
@@ -242,46 +265,64 @@ class CronScheduler:
 
         # 启动时恢复中断的任务
         self._recover_jobs()
+        self._running = True
 
-        while True:
+        while self._running:
             try:
                 await self.tick()
             except Exception as e:
                 logger.error(f"Tick error: {e}")
             await asyncio.sleep(self.TICK_INTERVAL)
 
+        # 循环退出后释放文件锁
+        self._release_lock()
+        logger.info("CronScheduler tick loop stopped")
+
+    def stop(self):
+        """停止 tick 循环"""
+        self._running = False
+
     async def tick(self):
         if not self._acquire_lock():
             return
 
         try:
-            jobs = self._load_jobs()
-            now = datetime.now()
+            # Phase 1: 标记到期任务（受 asyncio.Lock 保护）
+            async with self._lock:
+                jobs = self._load_jobs()
+                now = datetime.now()
 
-            # 1. 到期的 active 任务进入就绪队列
-            changed = False
-            for job in jobs:
-                if job["status"] == "active":
-                    next_run = datetime.fromisoformat(job["next_run_at"])
-                    if next_run <= now:
-                        job["status"] = "queued"
-                        changed = True
+                queued_ids = []
+                for job in jobs:
+                    if job["status"] == "active":
+                        next_run = datetime.fromisoformat(job["next_run_at"])
+                        if next_run <= now:
+                            job["status"] = "queued"
+                            queued_ids.append(job["id"])
 
-            if changed:
-                self._save_jobs(jobs)
+                if queued_ids:
+                    self._save_jobs(jobs)
 
-            # 2. 逐个执行就绪队列
-            queued = [j for j in self._load_jobs() if j["status"] == "queued"]
-            for job in queued:
-                self._set_job_field(job["id"], "status", "running")
+            # Phase 2: 逐个执行（释放 asyncio.Lock，允许 API 调用）
+            for job_id in queued_ids:
+                # 标记 running
+                async with self._lock:
+                    jobs = self._load_jobs()
+                    job = next((j for j in jobs if j["id"] == job_id and j["status"] == "queued"), None)
+                    if not job:
+                        continue
+                    job["status"] = "running"
+                    self._save_jobs(jobs)
+                    started = _now_iso()
 
+                # 执行（长时间运行，不持有锁）
                 try:
                     result = await self._execute_job(job)
-                    self._save_result(job, "success", result)
+                    self._save_result(job, "success", result, started_at=started)
                     last_run_status = "success"
                 except Exception as e:
                     logger.error(f"Job {job['id']} failed: {e}")
-                    self._save_result(job, "failed", str(e))
+                    self._save_result(job, "failed", str(e), started_at=started)
                     last_run_status = "failed"
                     result = f"执行失败: {e}"
 
@@ -294,7 +335,11 @@ class CronScheduler:
                         "message": (result or "")[:500],
                     })
 
-                self._update_next_run(job["id"], last_run_status)
+                # 更新下次执行时间
+                async with self._lock:
+                    jobs = self._load_jobs()
+                    self._update_next_run_inline(jobs, job["id"], last_run_status)
+                    self._save_jobs(jobs)
 
         finally:
             self._release_lock()
@@ -366,20 +411,8 @@ class CronScheduler:
 
     # ── 状态管理 ──────────────────────────────────────
 
-    def _set_job_field(self, job_id: str, key: str, value) -> Optional[dict]:
-        jobs = self._load_jobs()
-        for job in jobs:
-            if job["id"] == job_id:
-                job[key] = value
-                self._save_jobs(jobs)
-                return job
-        return None
-
-    def _set_status(self, job_id: str, status: str) -> Optional[dict]:
-        return self._set_job_field(job_id, "status", status)
-
-    def _update_next_run(self, job_id: str, last_run_status: str):
-        jobs = self._load_jobs()
+    def _update_next_run_inline(self, jobs: List[dict], job_id: str, last_run_status: str):
+        """在已加载的 jobs 列表上原地更新（避免重新加载）"""
         now = datetime.now()
         for j in jobs:
             if j["id"] == job_id:
@@ -389,14 +422,12 @@ class CronScheduler:
                 # once → 执行完直接完成
                 if j.get("type") == "once":
                     j["status"] = "completed"
-                    self._save_jobs(jobs)
                     return
 
                 # end_at 到期 → 完成
                 if j.get("end_at"):
                     if now >= datetime.fromisoformat(j["end_at"]):
                         j["status"] = "completed"
-                        self._save_jobs(jobs)
                         return
 
                 # repeat 倒计时 → 完成
@@ -404,13 +435,11 @@ class CronScheduler:
                     j["repeat"] -= 1
                     if j["repeat"] <= 0:
                         j["status"] = "completed"
-                        self._save_jobs(jobs)
                         return
 
                 # 继续
                 j["status"] = "active"
                 j["next_run_at"] = calc_next_run(j["schedule"])
-                self._save_jobs(jobs)
                 return
 
     def _recover_jobs(self):
@@ -432,23 +461,29 @@ class CronScheduler:
         if not self.jobs_path.exists():
             return []
         try:
-            jobs = json.loads(self.jobs_path.read_text(encoding="utf-8"))
+            content = self.jobs_path.read_text(encoding="utf-8")
+            jobs = json.loads(content)
             # 旧 job 兼容：无 type 字段时自动补上
             for job in jobs:
                 if "type" not in job:
                     job["type"] = _infer_type(job.get("schedule", ""))
             return jobs
-        except (json.JSONDecodeError, OSError) as e:
+        except json.JSONDecodeError as e:
+            logger.critical(f"jobs.json 损坏: {e}，已备份并重置")
+            backup = self.jobs_path.with_suffix(".json.bak")
+            self.jobs_path.rename(backup)
+            return []
+        except OSError as e:
             logger.error(f"Failed to load jobs.json: {e}")
             return []
 
     def _save_jobs(self, jobs: List[dict]):
-        self.jobs_path.parent.mkdir(parents=True, exist_ok=True)
-        self.jobs_path.write_text(
-            json.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8"
+        atomic_write(
+            self.jobs_path,
+            json.dumps(jobs, ensure_ascii=False, indent=2),
         )
 
-    def _save_result(self, job: dict, status: str, response: str):
+    def _save_result(self, job: dict, status: str, response: str, started_at: str = None):
         self.output_dir.mkdir(parents=True, exist_ok=True)
         job_dir = self.output_dir / job["id"]
         job_dir.mkdir(parents=True, exist_ok=True)
@@ -456,14 +491,14 @@ class CronScheduler:
         result = {
             "run_id": _short_id(),
             "job_id": job["id"],
-            "started_at": job.get("last_run_at", _now_iso()),
+            "started_at": started_at or _now_iso(),
             "finished_at": _now_iso(),
             "status": status,
             "response": response[:2000] if response else None,
             "error": None if status == "success" else response,
         }
         path = job_dir / f"{result['run_id']}.json"
-        path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write(path, json.dumps(result, ensure_ascii=False, indent=2))
 
     # ── 文件锁 ────────────────────────────────────────
 
@@ -474,6 +509,9 @@ class CronScheduler:
             fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return True
         except (IOError, OSError):
+            if self._lock_fd:
+                self._lock_fd.close()
+                self._lock_fd = None
             return False
 
     def _release_lock(self):

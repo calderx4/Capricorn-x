@@ -5,6 +5,7 @@ LLM 通过 Function Calling 管理 cron 任务。
 支持 action 参数式 API：create | list | update | pause | resume | run | remove
 """
 
+import json
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -27,9 +28,26 @@ class CronTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "管理定时任务。通过 action 参数执行不同操作："
-            "create（创建）、list（列出）、update（更新）、"
-            "pause（暂停）、resume（恢复）、run（立即执行）、remove（删除）。"
+            "定时任务管理工具。\n"
+            "用法：\n"
+            "  create — 创建任务（必填：prompt、schedule）\n"
+            "  list — 列出所有定时任务\n"
+            "  update — 更新任务配置（必填：job_id）\n"
+            "  pause — 暂停任务（必填：job_id）\n"
+            "  resume — 恢复任务（必填：job_id）\n"
+            "  run — 立即触发任务（必填：job_id）\n"
+            "  remove — 删除任务（必填：job_id）\n"
+            "schedule 格式：\n"
+            "  一次性任务（type=once）：\n"
+            "    '3m' → 3分钟后执行；'2h' → 2小时后；'1d' → 明天同时间\n"
+            "    '14:00' → 今天14:00；'2026-05-03T09:00:00' → 指定日期时间\n"
+            "  重复任务（type=recurring，可配合 repeat/end_at 限制次数）：\n"
+            "    'every 30m' → 每30分钟；'every 2h' → 每2小时\n"
+            "    '9:00' → 每天9:00；'14:30' → 每天14:30\n"
+            "    '0 9 * * 1-5' → 工作日每天9点（标准 cron）\n"
+            "  repeat=数字 → recurring 时生效，执行指定次数后自动停止（不传则无限循环）\n"
+            "  end_at=ISO时间 → recurring 时生效，到期后自动停止\n"
+            "  注意：数字必须带单位（m/h/d），直接写'2'无效。"
         )
 
     @property
@@ -57,7 +75,8 @@ class CronTool(BaseTool):
                         "调度时间，格式由 type 决定："
                         "once → 延迟('3m'/'2h'/'1d')、时间('13:25')、日期时间('2026-04-30T14:00:00')；"
                         "recurring → 间隔('every 30m'/'every 2h')、每天时间('13:25')、cron表达式('0 9 * * 1-5')。"
-                        "纯数字如'2'无效，必须带单位 m/h/d"
+                        "纯数字如'2'无效，必须带单位 m/h/d。"
+                        "配合 repeat 或 end_at 可限制 recurring 任务的执行次数或截止时间。"
                     ),
                 },
                 "prompt": {
@@ -94,92 +113,84 @@ class CronTool(BaseTool):
         }
 
     async def execute(self, action: str, **kwargs) -> str:
-        import json
-
         try:
             if action == "create":
-                return self._handle_create(**kwargs)
+                return await self._handle_create(**kwargs)
             elif action == "list":
                 return self._handle_list()
             elif action == "update":
-                return self._handle_update(**kwargs)
+                return await self._handle_update(**kwargs)
             elif action == "pause":
-                return self._handle_pause(**kwargs)
+                return await self._handle_pause(**kwargs)
             elif action == "resume":
-                return self._handle_resume(**kwargs)
+                return await self._handle_resume(**kwargs)
             elif action == "run":
-                return self._handle_run(**kwargs)
+                return await self._handle_run(**kwargs)
             elif action == "remove":
-                return self._handle_remove(**kwargs)
+                return await self._handle_remove(**kwargs)
             else:
                 return f"Error: Unknown action '{action}'"
         except Exception as e:
             logger.error(f"Cron tool error: {e}")
             return f"Error: {str(e)}"
 
-    def _handle_create(self, **kwargs) -> str:
-        import json
-
+    async def _handle_create(self, **kwargs) -> str:
         if not kwargs.get("prompt"):
             return "Error: 'prompt' is required for create action"
         if not kwargs.get("schedule"):
             return "Error: 'schedule' is required for create action"
 
-        job = self._scheduler.create_job(**kwargs)
+        job = await self._scheduler.create_job(**kwargs)
         return f"定时任务已创建:\n{json.dumps(job, ensure_ascii=False, indent=2)}"
 
     def _handle_list(self) -> str:
-        import json
-
         jobs = self._scheduler.list_jobs()
         if not jobs:
             return "当前没有定时任务"
         return f"共 {len(jobs)} 个定时任务:\n{json.dumps(jobs, ensure_ascii=False, indent=2)}"
 
-    def _handle_update(self, **kwargs) -> str:
-        import json
-
+    async def _handle_update(self, **kwargs) -> str:
         job_id = kwargs.get("job_id")
         if not job_id:
             return "Error: 'job_id' is required for update action"
 
         updates = {k: v for k, v in kwargs.items() if k not in ("action", "job_id") and v is not None}
-        job = self._scheduler.update_job(job_id, **updates)
+        job = await self._scheduler.update_job(job_id, **updates)
         if not job:
             return f"Error: Job '{job_id}' not found"
         return f"定时任务已更新:\n{json.dumps(job, ensure_ascii=False, indent=2)}"
 
-    def _handle_pause(self, **kwargs) -> str:
+    async def _handle_pause(self, **kwargs) -> str:
         job_id = kwargs.get("job_id")
         if not job_id:
             return "Error: 'job_id' is required for pause action"
-        job = self._scheduler.pause_job(job_id)
+        job = await self._scheduler.pause_job(job_id)
         if not job:
             return f"Error: Job '{job_id}' not found"
         return f"定时任务已暂停: {job['name']} ({job_id})"
 
-    def _handle_resume(self, **kwargs) -> str:
+    async def _handle_resume(self, **kwargs) -> str:
         job_id = kwargs.get("job_id")
         if not job_id:
             return "Error: 'job_id' is required for resume action"
-        job = self._scheduler.resume_job(job_id)
+        job = await self._scheduler.resume_job(job_id)
         if not job:
             return f"Error: Job '{job_id}' not found"
         return f"定时任务已恢复: {job['name']} ({job_id})"
 
-    def _handle_run(self, **kwargs) -> str:
+    async def _handle_run(self, **kwargs) -> str:
         job_id = kwargs.get("job_id")
         if not job_id:
             return "Error: 'job_id' is required for run action"
-        job = self._scheduler.run_job_now(job_id)
+        job = await self._scheduler.run_job_now(job_id)
         if not job:
             return f"Error: Job '{job_id}' not found"
         return f"定时任务已触发立即执行: {job['name']} ({job_id})"
 
-    def _handle_remove(self, **kwargs) -> str:
+    async def _handle_remove(self, **kwargs) -> str:
         job_id = kwargs.get("job_id")
         if not job_id:
             return "Error: 'job_id' is required for remove action"
-        if self._scheduler.remove_job(job_id):
+        if await self._scheduler.remove_job(job_id):
             return f"定时任务已删除: {job_id}"
         return f"Error: Job '{job_id}' not found"

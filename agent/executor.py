@@ -232,7 +232,7 @@ class CapricornAgent:
 
         # 对话成功后标记通知已读
         if unread_ids:
-            self._notification_bus.mark_read(unread_ids)
+            await self._notification_bus.mark_read(unread_ids)
 
         return response
 
@@ -308,6 +308,9 @@ class CapricornAgent:
     async def cleanup(self):
         """清理资源"""
         logger.info("Cleaning up resources...")
+
+        if self._cron_scheduler:
+            self._cron_scheduler.stop()
 
         if self.capability_registry:
             await self.capability_registry.cleanup()

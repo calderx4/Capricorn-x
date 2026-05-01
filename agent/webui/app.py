@@ -5,16 +5,12 @@ Capricorn WebUI - Streamlit 前端
 启动方式：python run.py --mode gateway_with_webui
 """
 
-import json
-from pathlib import Path
-
 import requests
 import streamlit as st
 
 # ── 配置 ────────────────────────────────────────────
 
 API_BASE = st.secrets.get("api_base", "http://127.0.0.1:8080")
-JOBS_PATH = Path(__file__).resolve().parent.parent.parent.parent / "gateway" / "jobs.json"
 
 # ── 页面配置 ────────────────────────────────────────
 
@@ -38,12 +34,11 @@ with st.sidebar:
     # ── Cron 任务 ──────────────────────────────────
     st.header("⏰ Cron 任务")
 
-    jobs = []
-    if JOBS_PATH.exists():
-        try:
-            jobs = json.loads(JOBS_PATH.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            jobs = []
+    try:
+        resp = requests.get(f"{API_BASE}/jobs", timeout=5)
+        jobs = resp.json().get("jobs", [])
+    except Exception:
+        jobs = []
 
     if jobs:
         for job in jobs:
