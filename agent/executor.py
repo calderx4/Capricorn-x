@@ -8,6 +8,7 @@ Executor - Agent 执行器
 """
 
 from typing import Optional
+from pathlib import Path
 from loguru import logger
 from langchain_core.messages import AIMessage
 
@@ -45,6 +46,7 @@ class CapricornAgent:
         self.history_log: Optional[HistoryLog] = None
         self._cron_scheduler = None
         self._notification_bus = None
+        self._system_prompt_path: Optional[str] = None
 
     @classmethod
     async def create(cls, config: Config, config_path: str = None, notification_bus=None) -> "CapricornAgent":
@@ -113,6 +115,9 @@ class CapricornAgent:
             self.capability_registry.tools.register(cron_tool, layer="builtin")
 
         # 8. 构建图（绑定所有工具到 LLM，包括 cron）
+        system_prompt_path = str(Path(__file__).parent.parent / "config" / "prompts" / "system.md")
+        self._system_prompt_path = system_prompt_path
+
         self.graph = CapricornGraph(
             self.capability_registry,
             self.skill_manager,
@@ -122,6 +127,7 @@ class CapricornAgent:
             self.llm_client,
             sandbox=self.config.workspace.sandbox,
             max_iterations=self.config.agent.get("max_iterations", 50),
+            system_prompt_path=system_prompt_path,
         )
 
         logger.info("✓ Capricorn Agent initialized")

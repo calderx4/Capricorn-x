@@ -21,7 +21,10 @@ from croniter import croniter
 from loguru import logger
 
 from config.settings import Config, WorkspaceConfig
-from core.prompt_utils import build_tools_section, build_skills_section, build_memory_section, clean_empty_sections
+from core.prompt_utils import (
+    build_tools_section, build_skills_section, build_memory_section,
+    PromptBuilder,
+)
 from core.utils import atomic_write
 
 
@@ -345,35 +348,25 @@ class CronScheduler:
             self._release_lock()
 
     def _build_cron_prompt(self, job: dict) -> str:
-        """构建 cron 专用 system prompt"""
-        template_path = Path(__file__).parent.parent / "config" / "prompts" / "cron.md"
-        template = template_path.read_text(encoding="utf-8")
-
-        fresh = job.get("fresh_session", False)
-
-        # 角色部分：fresh_session=true 且有自定义 prompt 时用它，否则沿用主 agent 角色
-        if fresh and job.get("system_prompt"):
-            role_prompt = job["system_prompt"]
-        else:
-            system_md_path = Path(__file__).parent.parent / "config" / "prompts" / "system.md"
-            role_prompt = system_md_path.read_text(encoding="utf-8")
+        """构建 cron 专用 system prompt（自包含，不嵌套 system.md）"""
+        cron_template_path = Path(__file__).parent.parent / "config" / "prompts" / "cron.md"
+        builder = PromptBuilder(str(cron_template_path))
 
         workspace_section = (
             f"# Workspace\n\n"
             f"工作区根目录：`{job['workdir']}`（沙盒模式）\n"
             f"路径直接写相对路径，不要加前缀。"
         )
+        builder.set("workspace_section", workspace_section)
 
-        memory_section = "" if fresh else build_memory_section(self._long_term_memory)
+        fresh = job.get("fresh_session", False)
+        builder.set("memory_section", "" if fresh else build_memory_section(self._long_term_memory))
+        builder.set("tools_section", build_tools_section(self._capability_registry))
+        builder.set("skills_section", build_skills_section(self._skill_manager))
+        builder.set("task_prompt", job.get("prompt", ""))
+        builder.set("current_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-        result = template.replace("{{role_prompt}}", role_prompt)
-        result = result.replace("{{workspace_section}}", workspace_section)
-        result = result.replace("{{tools_section}}", build_tools_section(self._capability_registry))
-        result = result.replace("{{skills_section}}", build_skills_section(self._skill_manager))
-        result = result.replace("{{memory_section}}", memory_section)
-        result = result.replace("{{current_time}}", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-
-        return clean_empty_sections(result)
+        return builder.build()
 
     async def _execute_job(self, job: dict) -> str:
         """执行单个任务：创建轻量 CapricornGraph"""
@@ -406,7 +399,7 @@ class CronScheduler:
         )
 
         logger.info(f"Executing cron job: {job['id']} ({job['name']})")
-        result = await graph.run(job["prompt"], thread_id="default")
+        result = await graph.run("执行上述任务。", thread_id="default")
         return result
 
     # ── 状态管理 ──────────────────────────────────────

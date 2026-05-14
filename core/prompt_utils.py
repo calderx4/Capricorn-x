@@ -1,8 +1,31 @@
 """
-Prompt 工具函数 — tools / skills / memory section 构建
+Prompt 工具函数 — PromptBuilder + section 构建器
 
 供 agent.py 和 scheduler.py 共用，避免重复逻辑。
 """
+
+from pathlib import Path
+
+
+class PromptBuilder:
+    """Prompt 组装器 — 注册 section → 替换模板 → 输出"""
+
+    def __init__(self, template_path: str):
+        p = Path(template_path)
+        if not p.exists():
+            raise FileNotFoundError(f"Prompt template not found: {template_path}")
+        self.template_path = template_path
+        self._sections: dict[str, str] = {}
+
+    def set(self, name: str, content: str):
+        self._sections[name] = content
+
+    def build(self) -> str:
+        template = Path(self.template_path).read_text("utf-8")
+        for name, content in self._sections.items():
+            template = template.replace("{{" + name + "}}", content)
+        return clean_empty_sections(template)
+
 
 LAYER_DESC_MAP = {
     "builtin": "## Built-in Tools\n本地基础能力 — 文件操作、命令执行、任务规划、记忆管理。",

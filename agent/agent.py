@@ -24,7 +24,10 @@ from pathlib import Path
 
 from core.utils import strip_thinking_tags
 from core import trace
-from core.prompt_utils import build_tools_section, build_skills_section, build_memory_section, clean_empty_sections
+from core.prompt_utils import (
+    build_tools_section, build_skills_section, build_memory_section,
+    PromptBuilder,
+)
 
 
 class CapricornGraph:
@@ -42,6 +45,7 @@ class CapricornGraph:
         max_iterations: int = 50,
         exclude_tools: list = None,
         system_prompt_override: str = None,
+        system_prompt_path: str = None,
     ):
         self.capability_registry = capability_registry
         self.skill_manager = skill_manager
@@ -53,6 +57,9 @@ class CapricornGraph:
         self.max_iterations = max_iterations
         self._exclude_tools = set(exclude_tools or [])
         self.system_prompt_override = system_prompt_override
+        self.system_prompt_path = system_prompt_path or str(
+            Path(__file__).parent.parent / "config" / "prompts" / "system.md"
+        )
 
         # 预绑定工具（排除指定工具）
         if self.llm_client:
@@ -243,15 +250,14 @@ class CapricornGraph:
         if self.system_prompt_override:
             return self.system_prompt_override
 
-        template_path = Path(__file__).parent.parent / "config" / "prompts" / "system.md"
-        template = template_path.read_text(encoding="utf-8")
+        builder = PromptBuilder(self.system_prompt_path)
 
         workspace_root = getattr(
             getattr(self.session_manager, "workspace", None), "root", "./workspace"
         )
 
         sandbox_note = "（沙盒模式：路径限制在工作区内）" if self.sandbox else "（可访问工作区外的路径）"
-        workspace_section = (
+        builder.set("workspace_section", (
             f"# Workspace\n\n"
             f"工作区根目录：`{workspace_root}` {sandbox_note}\n"
             f"所有工具（read_file、write_file、list_files、exec）都以工作区根目录为基准。\n"
@@ -262,7 +268,7 @@ class CapricornGraph:
             f"- `exec` 执行命令时默认在工作区根目录下运行。"
             f" 所以 `python main/my-task/app.py` 能直接找到文件。\n"
             f"- 操作前先用 `list_files` 查看工作区结构。"
-        )
+        ))
 
         # 历史摘要
         history_lines = self.history_log.read(limit=10) if self.history_log else []
@@ -273,6 +279,9 @@ class CapricornGraph:
                 + "\n".join(f"- {line}" for line in history_lines)
             )
 
+        builder.set("memory_section", build_memory_section(self.long_term_memory))
+        builder.set("history_section", history_section)
+
         # agent.md 项目概述（CWD 相对：跟随启动目录，允许多项目共享同一 agent 进程）
         agent_md_section = ""
         agent_md_path = Path("agent.md")
@@ -280,14 +289,10 @@ class CapricornGraph:
             content = agent_md_path.read_text(encoding="utf-8").strip()
             if content:
                 agent_md_section = f"# Project Context\n\n{content}"
+        builder.set("agent_md_section", agent_md_section)
 
-        # 变量替换
-        result = template.replace("{{workspace_section}}", workspace_section)
-        result = result.replace("{{memory_section}}", build_memory_section(self.long_term_memory))
-        result = result.replace("{{history_section}}", history_section)
-        result = result.replace("{{tools_section}}", build_tools_section(self.capability_registry))
-        result = result.replace("{{skills_section}}", build_skills_section(self.skill_manager))
-        result = result.replace("{{agent_md_section}}", agent_md_section)
-        result = result.replace("{{current_time}}", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        builder.set("tools_section", build_tools_section(self.capability_registry))
+        builder.set("skills_section", build_skills_section(self.skill_manager))
+        builder.set("current_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-        return clean_empty_sections(result)
+        return builder.build()
