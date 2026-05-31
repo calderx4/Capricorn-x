@@ -18,7 +18,6 @@ def _make_mock_graph(max_iterations=50):
     graph.long_term_memory = MagicMock()
     graph.long_term_memory.read = MagicMock(return_value="")
     graph.history_log = MagicMock()
-    graph.history_log.read = MagicMock(return_value=[])
     graph.llm_client = MagicMock()
     graph.sandbox = True
     graph.max_iterations = max_iterations

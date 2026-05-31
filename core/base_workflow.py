@@ -23,39 +23,20 @@ class BaseWorkflow(ABC):
     @property
     @abstractmethod
     def name(self) -> str:
-        """
-        工作流名称
-
-        Returns:
-            工作流的唯一标识符
-        """
         pass
 
     @property
     @abstractmethod
     def description(self) -> str:
-        """
-        工作流描述
-
-        Returns:
-            工作流的功能说明
-        """
         pass
 
     @property
     @abstractmethod
     def required_tools(self) -> List[str]:
-        """
-        依赖的工具列表
-
-        Returns:
-            工具名称列表
-        """
         pass
 
     @property
     def parameters_schema(self) -> Dict[str, Any]:
-        """工作流参数 schema，子类可覆写以自定义参数格式"""
         return {
             "type": "object",
             "properties": {
@@ -69,16 +50,6 @@ class BaseWorkflow(ABC):
 
     @abstractmethod
     async def execute(self, tools: Any, **kwargs: Any) -> Any:
-        """
-        执行工作流
-
-        Args:
-            tools: 工具注册中心实例，用于调用工具
-            **kwargs: 工作流参数
-
-        Returns:
-            执行结果
-        """
         pass
 
     def __repr__(self) -> str:

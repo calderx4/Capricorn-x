@@ -23,7 +23,7 @@ from core.base_workflow import BaseWorkflow
 from core.token_counter import TokenCounter
 from memory.long_term import LongTermMemory
 from memory.history import HistoryLog
-from .prompts import SAVE_MEMORY_TOOL, build_consolidation_prompt
+from capabilities.tools.workflow.extensions.memory_consolidation.prompts import SAVE_MEMORY_TOOL, build_consolidation_prompt
 
 
 class MemoryConsolidationWorkflow(BaseWorkflow):
@@ -46,12 +46,10 @@ class MemoryConsolidationWorkflow(BaseWorkflow):
     # ========== 配置 ==========
     MAX_MESSAGES_BEFORE_CONSOLIDATION = 30
     MESSAGES_TO_KEEP = 15
+    MIN_MESSAGES_TO_KEEP = 5  # Token 路径的硬下限，防止过度裁剪
 
     MAX_TOKENS_BEFORE_CONSOLIDATION = 8000
     TOKENS_TO_CONSOLIDATION_RATIO = 0.5
-
-    MEMORY_INJECTION_TOKENS = 2000
-    TOTAL_CONTEXT_BUDGET = 16000
 
     def __init__(self, long_term_memory: LongTermMemory, history_log: HistoryLog,
                  llm_client, config: Dict = None):
@@ -71,64 +69,33 @@ class MemoryConsolidationWorkflow(BaseWorkflow):
             self.MAX_TOKENS_BEFORE_CONSOLIDATION = config.get(
                 "max_tokens", self.MAX_TOKENS_BEFORE_CONSOLIDATION
             )
-            self.TOTAL_CONTEXT_BUDGET = config.get(
-                "context_budget", self.TOTAL_CONTEXT_BUDGET
-            )
-
-    def should_consolidate(self, session_data: Dict) -> bool:
-        messages = session_data.get("messages", [])
-        total_messages = len(messages)
-
-        if total_messages >= self.MAX_MESSAGES_BEFORE_CONSOLIDATION:
-            logger.info(
-                f"Consolidation triggered by message count: "
-                f"{total_messages}/{self.MAX_MESSAGES_BEFORE_CONSOLIDATION}"
-            )
-            return True
-
-        token_count = TokenCounter.count_messages_tokens(messages)
-        if token_count >= self.MAX_TOKENS_BEFORE_CONSOLIDATION:
-            logger.info(
-                f"Consolidation triggered by token count: "
-                f"{token_count}/{self.MAX_TOKENS_BEFORE_CONSOLIDATION}"
-            )
-            return True
-
-        total_tokens = self._estimate_total_context(session_data)
-        if total_tokens >= self.TOTAL_CONTEXT_BUDGET:
-            logger.warning(
-                f"Context budget exceeded: {total_tokens}/{self.TOTAL_CONTEXT_BUDGET}"
-            )
-            return True
-
-        return False
 
     def get_messages_to_consolidate(self, session_data: Dict) -> List[Dict]:
         messages = session_data.get("messages", [])
         n = len(messages)
 
-        if n <= self.MESSAGES_TO_KEEP:
+        if n <= self.MIN_MESSAGES_TO_KEEP:
             return []
 
-        # 消息数触发：按条数保留
+        # 路径 1：条数触发 → 保留最后 MESSAGES_TO_KEEP 条
         if n >= self.MAX_MESSAGES_BEFORE_CONSOLIDATION:
             return messages[:-self.MESSAGES_TO_KEEP]
 
-        # Token 数触发：凑 tokens，同时强制保留 MESSAGES_TO_KEEP 条
+        # 路径 2：Token 触发 → 按 token 预算从尾部裁剪，不固定保留条数
         token_count = TokenCounter.count_messages_tokens(messages)
         if token_count >= self.MAX_TOKENS_BEFORE_CONSOLIDATION:
             target_tokens = int(token_count * (1 - self.TOKENS_TO_CONSOLIDATION_RATIO))
-            # 必须保留的最后 MESSAGES_TO_KEEP 条不参与累加
-            kept_tail = messages[-self.MESSAGES_TO_KEEP:]
-            tail_tokens = TokenCounter.count_messages_tokens(kept_tail)
-            budget = target_tokens - tail_tokens
-            if budget <= 0:
-                return messages[:-self.MESSAGES_TO_KEEP]
+            # 从尾部累加：保留最新消息直到 tokens 达到 target
             accumulated = 0
-            for i, msg in enumerate(messages):
-                accumulated += TokenCounter.count_messages_tokens([msg])
-                if accumulated > budget:
-                    return messages[:max(1, i)]
+            keep_from = n
+            for i in range(n - 1, -1, -1):
+                accumulated += TokenCounter.count_messages_tokens([messages[i]])
+                if accumulated >= target_tokens:
+                    keep_from = i
+                    break
+            # 硬下限：至少保留 MIN_MESSAGES_TO_KEEP 条
+            keep_from = min(keep_from, n - self.MIN_MESSAGES_TO_KEEP)
+            return messages[:keep_from]
 
         return messages[:-self.MESSAGES_TO_KEEP]
 
@@ -210,12 +177,6 @@ class MemoryConsolidationWorkflow(BaseWorkflow):
             tools = f" [tools: {', '.join(msg['tools_used'])}]" if msg.get("tools_used") else ""
             lines.append(f"[{timestamp}] {role}{tools}: {content}")
         return "\n".join(lines)
-
-    def _estimate_total_context(self, session_data: Dict) -> int:
-        messages = session_data.get("messages", [])
-        memory_tokens = TokenCounter.estimate_tokens(self.long_term_memory.read())
-        messages_tokens = TokenCounter.count_messages_tokens(messages)
-        return memory_tokens + messages_tokens + 500
 
     def _fail_or_raw_archive(self, messages: List[Dict]) -> bool:
         self._consecutive_failures += 1

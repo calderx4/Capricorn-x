@@ -3,7 +3,7 @@
     "root": "./workspace",
     "memory_dir": "memory",
     "session_dir": "sessions",
-    "sandbox": false
+    "sandbox": true
   },
 
   "blocked_commands": [
@@ -53,10 +53,10 @@
 
   "memory": {
     "enabled": true,
-    "message_threshold": 120,
-    "messages_to_keep": 60,
-    "token_threshold": 800000,
-    "context_budget": 1280000
+    "message_threshold": 60,
+    "messages_to_keep": 20,
+    "token_threshold": 40000,
+    "context_budget": 160000
   },
 
   "skills": {
@@ -70,8 +70,6 @@
   "cron": {
     "enabled": true,
     "tick_interval": 60,
-    "output_dir": "gateway/output",
-    "default_timeout": 300,
     "fresh_session": false
   },
 

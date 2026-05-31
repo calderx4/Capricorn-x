@@ -6,7 +6,7 @@ LLM 通过 Function Calling 管理 cron 任务。
 """
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from loguru import logger
 
@@ -37,6 +37,11 @@ class CronTool(BaseTool):
             "  resume — 恢复任务（必填：job_id）\n"
             "  run — 立即触发任务（必填：job_id）\n"
             "  remove — 删除任务（必填：job_id）\n"
+            "role 说明：\n"
+            "  executor — 执行任务的角色，拥有全部工具，使用 executor 角色模板\n"
+            "  verifier — 验证质量的角色，只拥有检查/纠偏相关工具，使用 verifier 角色模板\n"
+            "  传了 role 后，prompt 只需写简短触发语（如'执行任务'、'执行质量验证流程。'），角色模板会自动注入完整指令。\n"
+            "  不传 role 时使用通用 cron 模板，prompt 需要自包含全部指令。\n"
             "schedule 格式：\n"
             "  一次性任务（type=once）：\n"
             "    '3m' → 3分钟后执行；'2h' → 2小时后；'1d' → 明天同时间\n"
@@ -102,6 +107,14 @@ class CronTool(BaseTool):
                 "end_at": {
                     "type": "string",
                     "description": "仅 recurring 生效。截止时间 ISO 格式，如 '2026-05-03T00:00:00'。到期后自动停止",
+                },
+                "role": {
+                    "type": "string",
+                    "description": (
+                        "角色名称。传了 role 后使用角色专属模板和工具白名单，prompt 只需简短触发语。"
+                        "executor=执行任务（全工具），verifier=验证质量（检查/纠偏工具）。"
+                        "不传则使用通用 cron 模板。"
+                    ),
                 },
                 "tags": {
                     "type": "array",

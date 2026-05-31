@@ -31,8 +31,10 @@ from core.utils import atomic_write
 
 MAX_PROMPT_LENGTH = 50000
 MAX_CONCURRENT_TASKS = 20
+MAX_TASK_TIMEOUT = 3600  # 单个异步任务最长 1 小时
 MAX_SSE_CLIENTS = 50
 TASK_ID_RE = re.compile(r'^[0-9a-f]{8}$')
+THREAD_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 
 
 @web.middleware
@@ -61,6 +63,7 @@ class Gateway:
         self._running_tasks: Dict[str, asyncio.Task] = {}
         self._thread_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._api_key = os.environ.get("GATEWAY_API_KEY", "")
+        self._default_task_timeout = config.gateway.task_timeout
 
     async def start(self):
         """启动 HTTP 服务"""
@@ -73,6 +76,9 @@ class Gateway:
             web.post("/chat", self._handle_chat),
             web.post("/task", self._handle_task_create),
             web.get("/task/{task_id}", self._handle_task_status),
+            web.get("/sessions", self._handle_sessions),
+            web.get("/history/{thread_id}", self._handle_history),
+            web.delete("/sessions/{thread_id}", self._handle_session_delete),
             web.get("/jobs", self._handle_jobs),
             web.get("/health", self._handle_health),
             web.get("/events", self._handle_sse),
@@ -85,6 +91,8 @@ class Gateway:
         site = web.TCPSite(runner, self.host, self.port)
         await site.start()
         logger.info(f"Gateway started on {self.host}:{self.port}" + (" (with WebUI)" if self.webui else ""))
+        if not self._api_key:
+            logger.warning("⚠ GATEWAY_API_KEY not set — authentication disabled. All endpoints are open.")
         if self._api_key:
             logger.info("Gateway authentication enabled")
 
@@ -138,6 +146,8 @@ class Gateway:
             return err
 
         thread_id = body.get("thread_id", "default")
+        if not THREAD_ID_RE.fullmatch(thread_id):
+            return web.json_response({"error": "Invalid thread_id"}, status=400)
 
         try:
             lock = self._get_thread_lock(thread_id)
@@ -163,6 +173,10 @@ class Gateway:
             return err
 
         task_id = uuid.uuid4().hex[:8]
+        task_timeout = body.get("timeout", self._default_task_timeout)
+        if not isinstance(task_timeout, int) or task_timeout <= 0:
+            task_timeout = self._default_task_timeout
+        task_timeout = min(task_timeout, MAX_TASK_TIMEOUT)
         task_data = {
             "task_id": task_id,
             "status": "pending",
@@ -171,6 +185,8 @@ class Gateway:
             "created_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
             "finished_at": None,
             "error": None,
+            "steps": [],
+            "timeout": task_timeout,
         }
         self._save_task(task_data)
 
@@ -273,6 +289,70 @@ class Gateway:
         await self._notification_bus.mark_read(ids)
         return web.json_response({"ok": True})
 
+    # ── Sessions ─────────────────────────────────────
+
+    async def _handle_sessions(self, request: web.Request) -> web.Response:
+        """GET /sessions — 列出所有会话"""
+        session_dir = self.agent.session_manager.session_dir
+        sessions = []
+        for f in sorted(session_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
+            tid = f.stem
+            msg_count = 0
+            first_content = ""
+            try:
+                with open(f, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                            if data.get("content") or data.get("tool_calls"):
+                                msg_count += 1
+                            if not first_content and data.get("role") == "user" and data.get("content"):
+                                first_content = data["content"][:80]
+                        except json.JSONDecodeError:
+                            continue
+            except OSError:
+                continue
+            sessions.append({
+                "thread_id": tid,
+                "message_count": msg_count,
+                "first_message": first_content,
+                "updated_at": datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                "mtime": f.stat().st_mtime,
+            })
+        sessions.sort(key=lambda s: s["mtime"], reverse=True)
+        # 不返回 mtime 给前端
+        for s in sessions:
+            s.pop("mtime", None)
+        return web.json_response({"sessions": sessions})
+
+    async def _handle_history(self, request: web.Request) -> web.Response:
+        """GET /history/{thread_id} — 获取会话的 user/assistant 消息"""
+        thread_id = request.match_info["thread_id"]
+        if not THREAD_ID_RE.fullmatch(thread_id):
+            return web.json_response({"error": "Invalid thread_id"}, status=400)
+        session = self.agent.session_manager.load_session(thread_id)
+        if not session:
+            return web.json_response({"messages": []})
+        display = []
+        for msg in session.messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if role in ("user", "assistant") and content and content.strip() and not msg.get("tool_calls"):
+                display.append({"role": role, "content": content})
+        return web.json_response({"messages": display})
+
+    async def _handle_session_delete(self, request: web.Request) -> web.Response:
+        """DELETE /sessions/{thread_id} — 删除会话"""
+        thread_id = request.match_info["thread_id"]
+        if not THREAD_ID_RE.fullmatch(thread_id):
+            return web.json_response({"error": "Invalid thread_id"}, status=400)
+        self.agent.session_manager.clear_session(thread_id)
+        self._thread_locks.pop(thread_id, None)
+        return web.json_response({"ok": True})
+
     # ── Thread Lock LRU ───────────────────────────────
 
     def _get_thread_lock(self, thread_id: str) -> asyncio.Lock:
@@ -281,7 +361,11 @@ class Gateway:
             return self._thread_locks[thread_id]
         lock = asyncio.Lock()
         self._thread_locks[thread_id] = lock
-        if len(self._thread_locks) > 1024:
+        # 超容量时淘汰最早的空闲锁，跳过正在持有的
+        while len(self._thread_locks) > 1024:
+            oldest_id, oldest_lock = next(iter(self._thread_locks.items()))
+            if oldest_lock.locked():
+                break  # 最早的锁正在使用，停止淘汰
             self._thread_locks.popitem(last=False)
         return lock
 
@@ -293,17 +377,31 @@ class Gateway:
             logger.error(f"Task {task_id} data file missing")
             self._running_tasks.pop(task_id, None)
             return
+
+        steps = task_data.setdefault("steps", [])
+        timeout = task_data.get("timeout", self._default_task_timeout)
         task_data["status"] = "running"
+        steps.append({"ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"), "event": "started"})
         self._save_task(task_data)
 
         try:
-            result = await self.agent.chat(prompt, thread_id=f"task_{task_id}")
+            result = await asyncio.wait_for(
+                self.agent.chat(prompt, thread_id=f"task_{task_id}"),
+                timeout=timeout,
+            )
             task_data["status"] = "done"
             task_data["result"] = result
+            steps.append({"ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"), "event": "completed"})
+        except asyncio.TimeoutError:
+            logger.warning(f"Task {task_id} timed out after {timeout}s")
+            task_data["status"] = "timeout"
+            task_data["error"] = f"Task timed out after {timeout}s"
+            steps.append({"ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"), "event": "timeout", "detail": f"exceeded {timeout}s limit"})
         except Exception as e:
             logger.error(f"Task {task_id} failed: {e}")
             task_data["status"] = "failed"
             task_data["error"] = "Internal error"
+            steps.append({"ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"), "event": "failed", "detail": str(e)[:500]})
         finally:
             task_data["finished_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
             self._save_task(task_data)

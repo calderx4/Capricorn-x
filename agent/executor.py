@@ -19,22 +19,56 @@ from capabilities.skills.manager import SkillManager
 from memory.session import SessionManager
 from memory.long_term import LongTermMemory
 from memory.history import HistoryLog
-from capabilities.tools.workflow.extensions.memory_consolidation import MemoryConsolidationWorkflow
 from core import trace
-from core.token_counter import TokenCounter
+from core.consolidation import consolidate_if_needed
+
+# 防止 LangChain OpenAI patch 被重复应用
+_lc_openai_patched = False
+
+
+def _ensure_lc_openai_extras_patch():
+    """一次性 patch：让 LangChain OpenAI 保留非标准字段（如 reasoning_content）。
+
+    DeepSeek 等模型在响应中返回 reasoning_content 等非标准字段，
+    LangChain 默认会丢弃。这个 patch 确保这些字段通过 additional_kwargs 保留。
+    """
+    global _lc_openai_patched
+    if _lc_openai_patched:
+        return
+    _lc_openai_patched = True
+
+    from langchain_openai.chat_models import base as _lc_base
+
+    _LC_KNOWN_KEYS = {
+        "role", "content", "name", "id", "function_call", "tool_calls",
+        "audio", "refusal", "parsed",
+    }
+
+    _orig_to_msg = _lc_base._convert_dict_to_message
+    def _to_msg_with_extras(_dict):
+        msg = _orig_to_msg(_dict)
+        if isinstance(msg, AIMessage):
+            for k, v in _dict.items():
+                if k not in _LC_KNOWN_KEYS and k not in msg.additional_kwargs:
+                    msg.additional_kwargs[k] = v
+        return msg
+    _lc_base._convert_dict_to_message = _to_msg_with_extras
+
+    _orig_to_dict = _lc_base._convert_message_to_dict
+    def _to_dict_with_extras(message, api="chat/completions"):
+        d = _orig_to_dict(message, api=api)
+        if isinstance(message, AIMessage) and message.additional_kwargs:
+            for k, v in message.additional_kwargs.items():
+                if k not in d:
+                    d[k] = v
+        return d
+    _lc_base._convert_message_to_dict = _to_dict_with_extras
 
 
 class CapricornAgent:
     """Capricorn Agent 执行器"""
 
     def __init__(self, config: Config, config_path: str = None):
-        """
-        初始化执行器
-
-        Args:
-            config: 配置对象
-            config_path: 配置文件路径（用于 SessionManager 初始化 LLM）
-        """
         self.config = config
         self.config_path = config_path
         self.graph: Optional[CapricornGraph] = None
@@ -47,20 +81,14 @@ class CapricornAgent:
         self._cron_scheduler = None
         self._notification_bus = None
         self._system_prompt_path: Optional[str] = None
+        self._bia_path: Optional[str] = None
+        self._roles: dict = {}
+        self._team_config: dict = {}
+        self._active_dir: Optional[Path] = None
+        self._cron_prompt_path: Optional[str] = None
 
     @classmethod
     async def create(cls, config: Config, config_path: str = None, notification_bus=None) -> "CapricornAgent":
-        """
-        工厂方法：创建并初始化 Agent
-
-        Args:
-            config: 配置对象
-            config_path: 配置文件路径（用于 SessionManager 初始化 LLM）
-            notification_bus: 通知总线（可选）
-
-        Returns:
-            初始化后的 Agent
-        """
         agent = cls(config, config_path)
         agent._notification_bus = notification_bus
         await agent.initialize()
@@ -77,7 +105,7 @@ class CapricornAgent:
         skills_dir = self.config.skills.get("skills_dir", "capabilities/skills/skills")
         self.skill_manager = SkillManager(skills_dir)
 
-        # 3. 初始化能力注册中心（传入 skill_manager 以注册 skill_view 工具）
+        # 3. 初始化能力注册中心（auto-discovery: builtin + mcp + workflow + skill）
         self.capability_registry = await CapabilityRegistry.create(
             self.config.mcp_servers,
             workspace_root=self.config.workspace.root,
@@ -86,18 +114,73 @@ class CapricornAgent:
             blocked_commands=self.config.blocked_commands,
         )
 
-        # 4. 初始化会话管理器
-        self.session_manager = SessionManager(
-            self.config.workspace
-        )
+        # 4. 加载角色系统
+        project_root = str(Path(self.config_path).parent) if self.config_path else "."
+        self._load_roles(project_root)
+        self._bia_path = str(Path(project_root) / "config" / "prompts" / "bia.md")
+        self._active_dir = Path(project_root) / "capabilities" / "tools" / "workflow" / "extensions"
+        self._cron_prompt_path = str(Path(project_root) / "config" / "prompts" / "cron.md")
 
-        # 5. 初始化长期记忆
+        # 5. 注册 BIA 工具（手动，需要 bia_path）
+        from core.utils import load_class_from_file
+        bia_tool_path = Path(project_root) / "capabilities" / "tools" / "builtin" / "extensions" / "bia_tools.py"
+        if bia_tool_path.exists():
+            BiaUpdateTool = load_class_from_file(bia_tool_path, "BiaUpdateTool")
+            bia_tool = BiaUpdateTool(bia_path=self._bia_path)
+            self.capability_registry.tools.register(bia_tool, layer="builtin")
+            logger.info("BIA tool registered")
+
+        # 6. 注册 Team 工具（如果定义了 roles）
+        if self._roles:
+            team_tool_path = Path(project_root) / "capabilities" / "tools" / "builtin" / "extensions" / "team_tools.py"
+            if team_tool_path.exists():
+                from core.utils import load_module_from_file
+                _team_mod = load_module_from_file(team_tool_path)
+
+                task_tool = _team_mod.TaskManageTool(
+                    workspace_root=self.config.workspace.root,
+                    team_config=self._team_config,
+                )
+                self.capability_registry.tools.register(task_tool, layer="builtin")
+
+                executor_cfg = self._team_config.get("executor", {})
+                spawn_tool = _team_mod.SpawnTool(
+                    llm_client=self.llm_client,
+                    capability_registry=self.capability_registry,
+                    skill_manager=self.skill_manager,
+                    long_term_memory=self.long_term_memory,
+                    roles=self._roles,
+                    bia_path=self._bia_path,
+                    workspace_root=self.config.workspace.root,
+                    sandbox=self.config.workspace.sandbox,
+                    max_iterations=self.config.agent.get("max_iterations", 50),
+                    max_questions=executor_cfg.get("max_questions", 3),
+                    max_attempts=executor_cfg.get("max_attempts", 3),
+                )
+                self.capability_registry.tools.register(spawn_tool, layer="builtin")
+
+                check_status_tool = _team_mod.CheckStatusTool(
+                    workspace_root=self.config.workspace.root,
+                )
+                self.capability_registry.tools.register(check_status_tool, layer="builtin")
+
+                get_result_tool = _team_mod.GetResultTool(
+                    workspace_root=self.config.workspace.root,
+                )
+                self.capability_registry.tools.register(get_result_tool, layer="builtin")
+
+                logger.info(f"Team tools registered (roles: {list(self._roles.keys())})")
+
+        # 7. 初始化会话管理器
+        self.session_manager = SessionManager(self.config.workspace)
+
+        # 8. 初始化长期记忆
         self.long_term_memory = LongTermMemory(self.config.workspace)
 
-        # 6. 初始化历史日志
+        # 9. 初始化历史日志
         self.history_log = HistoryLog(self.config.workspace)
 
-        # 7. 初始化 Cron 调度器（在构建图之前，确保 cron 工具已注册）
+        # 10. 初始化 Cron 调度器
         if self.config.cron.enabled:
             from agent.scheduler import CronScheduler
             from capabilities.tools.builtin.extensions.cron_tools import CronTool
@@ -109,12 +192,16 @@ class CapricornAgent:
                 skill_manager=self.skill_manager,
                 long_term_memory=self.long_term_memory,
                 notification_bus=self._notification_bus,
+                cron_prompt_path=self._cron_prompt_path,
+                bia_path=self._bia_path,
+                roles=self._roles,
+                active_dir=str(self._active_dir),
             )
 
             cron_tool = CronTool(self._cron_scheduler)
             self.capability_registry.tools.register(cron_tool, layer="builtin")
 
-        # 8. 构建图（绑定所有工具到 LLM，包括 cron）
+        # 11. 构建图
         system_prompt_path = str(Path(__file__).parent.parent / "config" / "prompts" / "system.md")
         self._system_prompt_path = system_prompt_path
 
@@ -123,14 +210,42 @@ class CapricornAgent:
             self.skill_manager,
             self.session_manager,
             self.long_term_memory,
-            self.history_log,
             self.llm_client,
             sandbox=self.config.workspace.sandbox,
             max_iterations=self.config.agent.get("max_iterations", 50),
             system_prompt_path=system_prompt_path,
+            bia_path=self._bia_path,
         )
 
         logger.info("✓ Capricorn Agent initialized")
+
+    def _load_roles(self, project_root: str):
+        """扫描 config/roles/ 目录，加载角色定义"""
+        import yaml
+        roles_dir = Path(project_root) / "config" / "roles"
+        if not roles_dir.exists():
+            return
+
+        for yaml_file in sorted(roles_dir.glob("*.yaml")):
+            try:
+                with open(yaml_file, "r", encoding="utf-8") as f:
+                    role_def = yaml.safe_load(f)
+
+                role_name = role_def.get("name", yaml_file.stem)
+                prompt_rel = role_def.get("prompt")
+                prompt_path = str((roles_dir / prompt_rel).resolve()) if prompt_rel else None
+
+                self._roles[role_name] = {
+                    "name": role_name,
+                    "description": role_def.get("description", ""),
+                    "prompt_path": prompt_path,
+                    "tools": role_def.get("tools", "all"),
+                }
+            except Exception as e:
+                logger.error(f"Failed to load role {yaml_file}: {e}")
+
+        if self._roles:
+            logger.info(f"Roles loaded: {list(self._roles.keys())}")
 
     def _init_llm_client(self):
         """初始化 LLM 客户端"""
@@ -146,9 +261,7 @@ class CapricornAgent:
             )
         elif llm_config.provider == "openai":
             from langchain_openai import ChatOpenAI
-            from langchain_openai.chat_models import base as _lc_base
 
-            # 构建 ChatOpenAI 参数
             openai_params = {
                 "model": llm_config.model,
                 "temperature": llm_config.temperature,
@@ -160,33 +273,7 @@ class CapricornAgent:
                 openai_params["base_url"] = llm_config.api_base
 
             self.llm_client = ChatOpenAI(**openai_params)
-
-            # Patch：LangChain 解析 API 响应时不保留非标准字段（如 reasoning_content），
-            # 序列化时也不带 additional_kwargs。两个方向都补回来。
-            _LC_KNOWN_KEYS = {
-                "role", "content", "name", "id", "function_call", "tool_calls",
-                "audio", "refusal", "parsed",
-            }
-
-            _orig_to_msg = _lc_base._convert_dict_to_message
-            def _to_msg_with_extras(_dict):
-                msg = _orig_to_msg(_dict)
-                if isinstance(msg, AIMessage):
-                    for k, v in _dict.items():
-                        if k not in _LC_KNOWN_KEYS and k not in msg.additional_kwargs:
-                            msg.additional_kwargs[k] = v
-                return msg
-            _lc_base._convert_dict_to_message = _to_msg_with_extras
-
-            _orig_to_dict = _lc_base._convert_message_to_dict
-            def _to_dict_with_extras(message, api="chat/completions"):
-                d = _orig_to_dict(message, api=api)
-                if isinstance(message, AIMessage) and message.additional_kwargs:
-                    for k, v in message.additional_kwargs.items():
-                        if k not in d:
-                            d[k] = v
-                return d
-            _lc_base._convert_message_to_dict = _to_dict_with_extras
+            _ensure_lc_openai_extras_patch()
         else:
             raise ValueError(f"Unsupported LLM provider: {llm_config.provider}")
 
@@ -195,23 +282,11 @@ class CapricornAgent:
             logger.debug(f"Using custom API base: {llm_config.api_base}")
 
     async def chat(self, user_input: str, thread_id: str = "default") -> str:
-        """
-        执行对话
-
-        Args:
-            user_input: 用户输入
-            thread_id: 会话 ID
-
-        Returns:
-            响应结果
-        """
         if not self.graph:
             raise RuntimeError("Agent not initialized")
 
-        # 对话开始前：检查并同步整合记忆（阻塞式）
         await self._check_and_consolidate_memory(thread_id)
 
-        # 获取未读通知，注入到本次对话
         notifications = ""
         unread_ids = []
         if self._notification_bus:
@@ -233,86 +308,38 @@ class CapricornAgent:
                 )
                 unread_ids = [n["id"] for n in unread]
 
-        # 执行对话
         response = await self.graph.run(user_input, thread_id, notifications=notifications)
 
-        # 对话成功后标记通知已读
         if unread_ids:
             await self._notification_bus.mark_read(unread_ids)
 
         return response
 
     async def _check_and_consolidate_memory(self, thread_id: str):
-        """对话前检查：是否需要整合记忆。两种触发：条数或 token 数超阈值。"""
+        """对话前检查：是否需要整合记忆"""
         try:
             mem_cfg = self.config.memory
             if not mem_cfg.enabled:
                 return
 
-            # 直接用内存中的 session，不重读文件
             session = self.session_manager.get_session(thread_id)
-            messages = session.get_history(max_messages=0)
+            messages = session.get_history()
 
-            if not messages:
-                return
-
-            # 触发条件 1：消息条数超阈值
-            total = len(messages)
-            triggered_by = None
-            if total > mem_cfg.message_threshold:
-                triggered_by = f"messages({total} > {mem_cfg.message_threshold})"
-
-            # 触发条件 2：总 token 数超阈值（仅条数未触发时才算）
-            if not triggered_by:
-                est_tokens = TokenCounter.count_messages_tokens(messages)
-                if est_tokens > mem_cfg.token_threshold:
-                    triggered_by = f"tokens({est_tokens} > {mem_cfg.token_threshold})"
-
-            if not triggered_by:
-                return
-
-            logger.info(f"Memory consolidation triggered by {triggered_by}")
-
-            workflow = MemoryConsolidationWorkflow(
+            await consolidate_if_needed(
+                session_manager=self.session_manager,
+                session_id=thread_id,
+                messages=messages,
+                active_dir=self._active_dir,
                 long_term_memory=self.long_term_memory,
                 history_log=self.history_log,
                 llm_client=self.llm_client,
-                config={
-                    "max_messages": mem_cfg.message_threshold,
-                    "messages_to_keep": mem_cfg.messages_to_keep,
-                    "max_tokens": mem_cfg.token_threshold,
-                    "context_budget": mem_cfg.context_budget,
-                }
+                mem_config=mem_cfg,
             )
-
-            session_data = {"messages": messages}
-            logger.info(f"Consolidating {len(messages)} messages, keep={mem_cfg.messages_to_keep}")
-            success = await workflow.execute(session_data=session_data)
-            logger.info(f"Consolidation result: {success}")
-
-            if success:
-                to_consolidate = workflow.get_messages_to_consolidate(session_data)
-                num_remove = len(to_consolidate)
-                remaining = messages[num_remove:]
-
-                # 去掉开头的孤儿 tool 消息（其父 AIMessage 已被整合掉）
-                while remaining and remaining[0].get("role") == "tool":
-                    remaining.pop(0)
-
-                trace.consolidation(triggered_by, len(messages), len(remaining), True)
-
-                self.session_manager.rewrite_session(thread_id, remaining)
-
-                logger.info(f"Consolidated {num_remove} messages, kept {len(remaining)}")
-            else:
-                logger.warning("Memory consolidation failed")
-                trace.consolidation(triggered_by, len(messages), len(messages), False)
 
         except Exception as e:
             logger.exception(f"Memory consolidation error: {e}")
 
     async def cleanup(self):
-        """清理资源"""
         logger.info("Cleaning up resources...")
 
         if self._cron_scheduler:

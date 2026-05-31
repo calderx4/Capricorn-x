@@ -1,110 +1,127 @@
+# Capricorn-x
 
-# ↻ Capricorn Agent
+> v0.2.5 | 原生 Function Calling 驱动的轻量级通用 Agent Runtime
 
-**原生 Function Calling 驱动的轻量级通用 Agent Runtime。**
+轻量级 Agent Runtime，支持 Cron 定时调度、Agent Teams 协作、垂直领域一键扩展。
 
-面向任务执行与垂直落地的 Agent 框架。不依赖 ReAct、状态机或 think/act 拆分，将决策权完全交由 LLM 原生 FC，Runtime 仅负责调度与执行。核心代码透明可 Hack，方便二次开发、落地垂直领域。
+---
 
-- **任务通用** — 代码生成、系统操作、数据处理、长任务自动执行
-- **轻量** — 无 ReAct / 无状态图 / 无复杂调度器，单循环：LLM → FC → 执行 → 回传
-- **长任务** — 自动上下文压缩、JSONL 原子写入、Cron 定时 + SSE 推送
-- **易二次开发** — 加工具一个文件，加技能一个 SKILL.md，改核心逻辑只看 agent.py
-
-## 🔧 安装
+## 快速开始
 
 ```bash
 git clone https://github.com/calderx4/Capricorn-x.git
 cd Capricorn-x
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e ".[dev]"
 cp .env.example .env
 # 编辑 .env 填入 API Key
+
+python run.py --mode gateway_with_webui
+# 浏览器打开 http://localhost:8080
 ```
-
-## 🚀 运行
-
-```bash
-python run.py                                  # CLI 交互
-python run.py --mode gateway                   # HTTP API + Cron
-python run.py --mode gateway_with_webui        # HTTP API + Cron + Web 前端
-```
-
-## ⚡ 核心能力
-
-**原生 FC 循环** — 模型自己决定调不调工具、调哪个、什么时候停。并发执行 + 5 分钟单工具超时 + 迭代上限保护。
-
-**三层能力架构** — 统一注册、自动发现。
-
-| 层级 | 说明 | 已有工具 |
-|------|------|----------|
-| 内置工具 | 本地原子操作 | read_file、write_file、edit_file、list_files、exec、todo、cron、skill_view、memory_update、history_search |
-| MCP 工具 | 外部服务协议接入 | MiniMax MCP、高德地图等（配置即用） |
-| 工作流 | 复杂流程封装 | create_document、self_test、memory_consolidation |
-
-**记忆系统** — JSONL 会话 + MEMORY.md 长期记忆 + HISTORY.md 历史摘要。对话超阈值自动 LLM 整合，原子写入防崩溃。
-
-**Cron 定时任务** — LLM 通过 FC 管理（create/list/pause/resume/remove），协程执行防递归，支持 `repeat` 次数和 `end_at` 截止限制。
-
-**技能系统** — 8 个内置技能，通过 `skill_view(name)` 按需加载。新增技能只需一个目录 + SKILL.md。
-
-**多 LLM** — OpenAI 兼容 API（DeepSeek、MiniMax、GLM、Qwen 等）+ Anthropic Claude，`reasoning_content` 字段自动兼容。
-
-**Gateway HTTP** — aiohttp 轻量服务。
-
-| 端点 | 说明 |
-|------|------|
-| `POST /chat` | 对话（支持 thread_id 多会话） |
-| `POST /task` | 异步任务 |
-| `GET /task/{id}` | 查询任务状态 |
-| `GET /jobs` | 列出 Cron 任务 |
-| `GET /events` | SSE 实时推送通知 |
-| `GET /notifications` | 查询通知 |
-| `POST /notifications/read` | 标记已读 |
-| `GET /health` | 健康检查 |
-
-## 🛠️ 技能
-
-| 技能 | 触发场景 |
-|------|----------|
-| frontend-dev | 前端页面、UI 设计、动画 |
-| fullstack-dev | 全栈应用、REST API、数据库 |
-| minimax-multimodal | 图片/视频/语音/音乐生成、图像理解 |
-| minimax-docx | Word 文档、排版、报告 |
-| minimax-pdf | PDF 生成、表单填充 |
-| minimax-xlsx | Excel 表格、公式、财务模型 |
-| pptx-generator | PPT 演示文稿 |
-| code-review | 代码审查 |
-
-## 📁 项目结构
-
-```
-agent/               # FC 循环、调度器、通知、Gateway、WebUI
-capabilities/
-  ├── skills/        # 技能系统（SKILL.md 自动发现）
-  └── tools/         # 工具系统（builtin / mcp / workflow 三层）
-config/              # config.json + prompts 模板
-core/                # BaseTool、BaseWorkflow、沙盒、token 计数、atomic_write
-memory/              # Session（JSONL）、MEMORY.md、HISTORY.md
-tests/               # pytest 测试
-run.py               # 入口
-```
-
-## 🛠️ 二次开发
-
-**加工具** — 在 `capabilities/tools/` 对应 layer 下新建文件，继承 `BaseTool`，实现 `name`、`description`、`parameters`、`execute`，自动发现注册。
-
-**加技能** — 在 `capabilities/skills/skills/` 下新建目录，写 `SKILL.md`（frontmatter 含 name、description、available），自动发现注入。
-
-**改核心** — FC 循环在 `agent/agent.py`，调度在 `agent/scheduler.py`，配置在 `config/settings.py`，逻辑透明，改哪看哪。
-
-**接 MCP** — 在 `config.json` 的 `mcp_servers` 加配置，自动连接注册。
-
-## 参考
-
-参考了 NanoBot、Hermes、MiniMax Skills。
 
 ---
 
-<p align="center">
-  <em>原生 FC · 极简循环 · 拿来就能改的 Agent 框架</em>
-</p>
+## 使用案例
+
+### 1. 文件任务
+
+在 WebUI 中输入"帮我创建一个 Python 项目"，Agent 自动调用 read_file / write_file / exec 等工具完成项目搭建，包括目录结构、配置文件、主程序。
+
+### 2. 批量处理
+
+配置 Cron 定时任务（如每天早上 9 点），Agent 自动汇总项目状态，检查待办、生成报告，通过 SSE 实时推送结果。
+
+### 3. 质量检查
+
+通过 quality_check 工具按维度（正确性、规范性、可维护性等）检查代码质量，发现问题自动记录并可回滚。
+
+---
+
+## 架构设计
+
+### 整体架构
+
+```
+用户
+  │
+  ▼
+Capricorn（主 Agent）
+  │
+  ├── FC 循环       — LLM → tool_calls → execute → repeat
+  ├── spawn()       — 派发子 Agent（executor 执行 / verifier 验收）
+  └── cron()        — 定时任务，支持角色化配置
+```
+
+### 三层记忆
+
+| 记忆层 | 存储位置 | 用途 |
+|--------|----------|------|
+| 会话记忆 | JSONL 文件 | 单次对话上下文 |
+| 长期记忆 | MEMORY.md | Agent 需要始终记住的事实和偏好 |
+| 历史摘要 | HISTORY.md | 可搜索的行动历史记录 |
+
+### 角色化设计
+
+角色化将身份、权限、指令三层解耦：
+
+| 层 | 决定 | 位置 |
+|----|------|------|
+| 身份（WHO）| 行为准则 | prompts/roles/executor.md |
+| 权限（WHAT）| 可用工具白名单 | roles/executor.yaml |
+| 指令（HOW）| 具体任务内容 | cron prompt / spawn brief |
+
+不同角色使用不同工具集合，executor 负责产出，verifier 负责验收，两者对抗协作提升质量。
+
+### 工具注册
+
+工具统一通过 BaseTool 基类注册，自动发现并加载：
+
+- **内置工具** — 文件读写、命令执行、任务管理等
+- **MCP 工具** — 通过 MCP 协议接入外部服务
+- **工作流** — 多步编排的复杂任务
+
+---
+
+## 核心能力
+
+| 能力 | 说明 |
+|------|------|
+| 原生 FC 循环 | LLM → tool_calls → execute，无 ReAct / 无状态机 |
+| 三层记忆 | 会话（JSONL）+ 长期（MEMORY.md）+ 历史（HISTORY.md）|
+| MCP 协议 | stdio / SSE 接入外部服务（搜索、图像理解等）|
+| 工具系统 | 文件、命令、任务、质量、变更日志等 |
+| 技能系统 | 按需加载领域专属技能 |
+| Gateway API | HTTP + SSE 实时推送，支持多会话 |
+
+---
+
+## 配置
+
+环境变量用 `${VAR_NAME}` 注入：
+
+```json
+{
+  "llm": {
+    "model": "MiniMax-M2.7",
+    "api_key": "${MINIMAX_API_KEY}",
+    "api_base": "https://api.minimaxi.com/v1"
+  },
+  "workspace": { "sandbox": true },
+  "verticals": ["default"]
+}
+```
+
+---
+
+## 测试
+
+```bash
+pytest tests/ -q
+```
+
+---
+
+## License
+
+MIT

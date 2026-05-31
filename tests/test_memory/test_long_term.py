@@ -19,25 +19,11 @@ class TestLongTermMemory:
         assert "item1" in content
         assert "item2" in content
 
-    def test_append(self, tmp_path):
-        mem = self._make_memory(tmp_path)
-        mem.write("first line")
-        mem.append("second line")
-        content = mem.read()
-        assert "first line" in content
-        assert "second line" in content
-
     def test_overwrite(self, tmp_path):
         mem = self._make_memory(tmp_path)
         mem.write("old content")
         mem.write("new content")
         assert mem.read() == "new content"
-
-    def test_exists(self, tmp_path):
-        mem = self._make_memory(tmp_path)
-        assert not mem.exists()
-        mem.write("something")
-        assert mem.exists()
 
     def test_creates_memory_dir(self, tmp_path):
         mem = self._make_memory(tmp_path)

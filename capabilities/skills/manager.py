@@ -17,45 +17,34 @@ from .loader import SkillLoader
 class SkillManager:
     """技能管理器"""
 
-    def __init__(self, skills_dir: str):
-        """
-        初始化技能管理器
-
-        Args:
-            skills_dir: 技能目录路径
-        """
-        self.skills_dir = Path(skills_dir)
+    def __init__(self, skills_dir: str = None):
         self._skills: Dict[str, Dict[str, Any]] = {}
-        self._load_all_skills()
+        if skills_dir:
+            self._load_dir(skills_dir)
 
-    def _load_all_skills(self) -> None:
-        """加载所有技能"""
-        if not self.skills_dir.exists():
-            logger.warning(f"Skills directory not found: {self.skills_dir}")
+    def _load_dir(self, skills_dir: str) -> None:
+        """加载 skill 目录"""
+        dir_path = Path(skills_dir)
+        if not dir_path.exists():
             return
 
-        # 遍历技能目录
-        for skill_dir in self.skills_dir.iterdir():
+        for skill_dir in dir_path.iterdir():
             if not skill_dir.is_dir():
                 continue
 
-            # 查找 SKILL.md 文件
             skill_file = SkillLoader.find_skill_file(skill_dir)
             if not skill_file:
-                logger.debug(f"No SKILL.md found in {skill_dir}")
                 continue
 
             try:
-                # 加载技能
                 skill_data = SkillLoader.load(skill_file)
                 skill_name = skill_data.get("name")
-
-                if skill_name:
-                    self._skills[skill_name] = skill_data
-                    logger.debug(f"Loaded skill: {skill_name}")
-                else:
+                if not skill_name:
                     logger.warning(f"Skill missing 'name' field: {skill_file}")
+                    continue
 
+                self._skills[skill_name] = skill_data
+                logger.debug(f"Loaded skill: {skill_name}")
             except Exception as e:
                 logger.error(f"Failed to load skill from {skill_file}: {e}")
 
@@ -108,6 +97,15 @@ class SkillManager:
             if data.get("available", False)
         }
 
+    def get_autoload_skills(self) -> Dict[str, Dict[str, Any]]:
+        """
+        获取所有 autoload=true 的技能，用于直接注入 system prompt。
+        """
+        return {
+            name: data for name, data in self._skills.items()
+            if data.get("autoload", False)
+        }
+
     def get_skill_summary(self) -> str:
         """
         获取所有可用技能的摘要（XML 格式）
@@ -126,13 +124,3 @@ class SkillManager:
             summaries.append(summary)
 
         return "<skills>\n" + "\n".join(summaries) + "\n</skills>"
-
-    def has(self, name: str) -> bool:
-        """检查技能是否存在"""
-        return name in self._skills
-
-    def __len__(self) -> int:
-        return len(self._skills)
-
-    def __contains__(self, name: str) -> bool:
-        return name in self._skills

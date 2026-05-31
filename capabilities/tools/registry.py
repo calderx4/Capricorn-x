@@ -1,10 +1,5 @@
 """
 Tool Registry - 工具注册和执行
-
-参考 nanobot 实现：
-- 统一注册
-- 并发执行
-- 错误处理
 """
 
 import asyncio
@@ -20,10 +15,9 @@ class ToolRegistry:
 
     def __init__(self):
         self._tools: Dict[str, BaseTool] = {}
-        self._layers: Dict[str, str] = {}  # tool_name -> layer (builtin/mcp/workflow)
+        self._layers: Dict[str, str] = {}  # name -> layer
 
-    def register(self, tool: BaseTool, layer: str = "builtin") -> None:
-        """注册工具"""
+    def register(self, tool: BaseTool, layer: str = "builtin", public_name: str = None) -> None:
         try:
             schema = tool.parameters
             if not isinstance(schema, dict):
@@ -31,45 +25,39 @@ class ToolRegistry:
             elif "type" not in schema:
                 logger.warning(f"Tool '{tool.name}' schema missing 'type' field")
 
-            self._tools[tool.name] = tool
-            self._layers[tool.name] = layer
-            logger.debug(f"✓ Registered [{layer}] tool: {tool.name}")
+            name = public_name or tool.name
+            if name in self._tools:
+                existing_layer = self._layers.get(name, "?")
+                raise ValueError(
+                    f"Tool name conflict: '{name}' already registered [{existing_layer}]."
+                )
+            self._tools[name] = tool
+            self._layers[name] = layer
+            logger.debug(f"✓ Registered [{layer}] tool: {name}")
 
         except Exception as e:
             logger.error(f"Failed to register tool '{tool.name}': {e}")
             raise
 
-    def unregister(self, name: str) -> None:
-        """注销工具"""
-        self._tools.pop(name, None)
-        self._layers.pop(name, None)
-
     def get(self, name: str) -> Optional[BaseTool]:
-        """获取工具"""
         return self._tools.get(name)
 
-    def has(self, name: str) -> bool:
-        """检查工具是否存在"""
-        return name in self._tools
-
     def list_tools(self) -> List[str]:
-        """列出所有工具"""
         return list(self._tools.keys())
 
     def list_by_layer(self) -> Dict[str, List[str]]:
-        """按层级列出工具"""
-        layers = {"builtin": [], "mcp": [], "workflow": []}
+        layers: Dict[str, List[str]] = {"builtin": [], "mcp": [], "workflow": []}
         for name, layer in self._layers.items():
             if layer in layers:
                 layers[layer].append(name)
+            else:
+                layers[layer] = [name]
         return layers
 
     def get_langchain_tools(self) -> List:
-        """获取所有工具的 LangChain 格式"""
         return [tool.to_langchain_tool() for tool in self._tools.values()]
 
     async def execute(self, name: str, params: Dict[str, Any]) -> Any:
-        """执行工具"""
         _HINT = "\n\n[Analyze the error above and try a different approach.]"
 
         tool = self._tools.get(name)
@@ -92,7 +80,6 @@ class ToolRegistry:
             if isinstance(result, str) and result.startswith("Error:"):
                 return result + _HINT
 
-            # 结构化：dict/list → JSON 字符串
             if isinstance(result, (dict, list)):
                 return json.dumps(result, ensure_ascii=False)
 
@@ -102,26 +89,8 @@ class ToolRegistry:
             logger.error(f"Tool execution failed: {name} - {e}")
             return f"Error executing {name}: {str(e)}{_HINT}"
 
-    async def execute_batch(self, tool_calls: List[Dict[str, Any]]) -> List[Any]:
-        """并发执行多个工具调用"""
-        tasks = [
-            self.execute(call["name"], call["arguments"])
-            for call in tool_calls
-        ]
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        processed = []
-        for result in results:
-            if isinstance(result, Exception):
-                processed.append(f"Error: {type(result).__name__}: {result}")
-            else:
-                processed.append(result)
-
-        return processed
-
     def __len__(self) -> int:
         return len(self._tools)
 
-    def __contains__(self, name: str) -> bool:
+    def __contains__(self, name) -> bool:
         return name in self._tools

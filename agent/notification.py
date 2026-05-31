@@ -24,7 +24,7 @@ class NotificationBus:
 
     def __init__(self):
         self._subscribers: List[asyncio.Queue] = []
-        self._path = Path("gateway/notifications.jsonl")
+        self._path = Path(__file__).resolve().parent.parent / "gateway" / "notifications.jsonl"
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._file_lock = asyncio.Lock()
 
@@ -74,7 +74,7 @@ class NotificationBus:
         if not notification_ids:
             return
         async with self._file_lock:
-            notifications = self._load_all()
+            notifications = await asyncio.to_thread(self._load_all)
             id_set = set(notification_ids)
             changed = False
             for n in notifications:
@@ -85,8 +85,8 @@ class NotificationBus:
                 await asyncio.to_thread(self._rewrite, notifications)
 
     def get_recent(self, limit: int = 20, unread_only: bool = False) -> List[dict]:
-        """获取最近通知"""
-        all_n = self._load_all()
+        """获取最近通知（只读文件尾部，避免全量加载）"""
+        all_n = self._load_tail(limit * 5)  # 多读一些以应对 unread_only 过滤
         if unread_only:
             all_n = [n for n in all_n if not n.get("read")]
         return all_n[-limit:]
@@ -116,6 +116,27 @@ class NotificationBus:
             lines = self._path.read_text(encoding="utf-8").strip().split("\n")
             return [json.loads(line) for line in lines if line.strip()]
         except (json.JSONDecodeError, OSError):
+            return []
+
+    def _load_tail(self, n: int) -> List[dict]:
+        """从文件尾部加载最近 n 条通知（避免全量读取）"""
+        if not self._path.exists():
+            return []
+        try:
+            with open(self._path, "r", encoding="utf-8") as f:
+                # deque 保留最后 n 行
+                from collections import deque
+                tail_lines = deque(f, maxlen=n)
+            results = []
+            for line in tail_lines:
+                line = line.strip()
+                if line:
+                    try:
+                        results.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+            return results
+        except OSError:
             return []
 
     def _rewrite(self, notifications: List[dict]):

@@ -54,7 +54,7 @@ class LLMConfig(BaseModel):
     provider: str
     model: str
     api_key: str
-    api_base: str = None  # Optional: for custom API endpoints
+    api_base: str = None
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4096, gt=0)
 
@@ -88,8 +88,6 @@ class CronConfig(BaseModel):
 
     enabled: bool = False
     tick_interval: int = Field(default=60, gt=0)
-    output_dir: str = "cron/output"
-    default_timeout: int = Field(default=300, gt=0)
     fresh_session: bool = False
 
 
@@ -98,6 +96,7 @@ class GatewayConfig(BaseModel):
 
     host: str = "127.0.0.1"
     port: int = Field(default=8080, gt=0)
+    task_timeout: int = Field(default=600, gt=0)
 
 
 class Config(BaseModel):
@@ -139,7 +138,14 @@ class Config(BaseModel):
         # 解析环境变量
         data = cls._resolve_env_vars(data)
 
-        return cls(**data)
+        config = cls(**data)
+
+        # workspace.root 绝对路径解析（基于配置文件位置 = config/config.json → parent = config/ → parent = project root）
+        if not Path(config.workspace.root).is_absolute():
+            project_root = path.resolve().parent.parent
+            config.workspace.root = str(project_root / config.workspace.root)
+
+        return config
 
     @staticmethod
     def _resolve_env_vars(data: Any) -> Any:

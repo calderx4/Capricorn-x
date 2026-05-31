@@ -1,14 +1,14 @@
 [project]
-name = "capricorn"
-version = "0.2.1"
-description = "原生 Function Calling 驱动的可扩展 LLM Agent 系统"
+name = "capricorn-v"
+version = "0.2.5"
+description = "原生 Function Calling 驱动的轻量级通用 Agent Runtime — 垂直领域一键扩展"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.12"
 authors = [
     {name = "Capricorn Contributors"}
 ]
-keywords = ["function-calling", "llm-agent", "agent", "mcp", "ai"]
+keywords = ["function-calling", "llm-agent", "agent", "mcp", "ai", "vertical", "capricorn"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

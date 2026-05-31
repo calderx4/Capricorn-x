@@ -56,14 +56,14 @@ class TestToolRegistry:
         self.echo = _EchoTool()
         self.add = _AddTool()
 
-    def test_register_and_has(self):
+    def test_register_and_contains(self):
         self.registry.register(self.echo)
-        assert self.registry.has("echo")
-        assert not self.registry.has("nonexistent")
+        assert "echo" in self.registry
+        assert "nonexistent" not in self.registry
 
     def test_list_tools(self):
         self.registry.register(self.echo)
-        self.registry.register(self.add, layer="builtin")
+        self.registry.register(self.add, layer="tools")
         tools = self.registry.list_tools()
         assert "echo" in tools
         assert "add" in tools
@@ -78,21 +78,16 @@ class TestToolRegistry:
         assert "echo" in self.registry
         assert "missing" not in self.registry
 
-    def test_unregister(self):
-        self.registry.register(self.echo)
-        self.registry.unregister("echo")
-        assert not self.registry.has("echo")
-
     def test_get(self):
         self.registry.register(self.echo)
         assert self.registry.get("echo") is self.echo
         assert self.registry.get("missing") is None
 
     def test_list_by_layer(self):
-        self.registry.register(self.echo, layer="builtin")
+        self.registry.register(self.echo, layer="tools")
         self.registry.register(self.add, layer="mcp")
         layers = self.registry.list_by_layer()
-        assert "echo" in layers["builtin"]
+        assert "echo" in layers["tools"]
         assert "add" in layers["mcp"]
 
 
@@ -125,11 +120,3 @@ class TestToolExecution:
         result = await self.registry.execute("echo", {})
         assert "Error" in result
         assert "Missing required" in result
-
-    @pytest.mark.asyncio
-    async def test_execute_batch(self):
-        results = await self.registry.execute_batch([
-            {"name": "echo", "arguments": {"text": "a"}},
-            {"name": "echo", "arguments": {"text": "b"}},
-        ])
-        assert results == ["a", "b"]

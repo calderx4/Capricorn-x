@@ -26,7 +26,7 @@ from core.utils import strip_thinking_tags
 from core import trace
 from core.prompt_utils import (
     build_tools_section, build_skills_section, build_memory_section,
-    PromptBuilder,
+    build_bia_section, build_prompt,
 )
 
 
@@ -39,27 +39,25 @@ class CapricornGraph:
         skill_manager,
         session_manager,
         long_term_memory,
-        history_log,
         llm_client=None,
         sandbox: bool = True,
         max_iterations: int = 50,
         exclude_tools: list = None,
         system_prompt_override: str = None,
         system_prompt_path: str = None,
+        bia_path: str = None,
     ):
         self.capability_registry = capability_registry
         self.skill_manager = skill_manager
         self.session_manager = session_manager
         self.long_term_memory = long_term_memory
-        self.history_log = history_log
         self.llm_client = llm_client
         self.sandbox = sandbox
         self.max_iterations = max_iterations
         self._exclude_tools = set(exclude_tools or [])
         self.system_prompt_override = system_prompt_override
-        self.system_prompt_path = system_prompt_path or str(
-            Path(__file__).parent.parent / "config" / "prompts" / "system.md"
-        )
+        self.system_prompt_path = system_prompt_path
+        self.bia_path = bia_path
 
         # 预绑定工具（排除指定工具）
         if self.llm_client:
@@ -80,7 +78,7 @@ class CapricornGraph:
         system_prompt = self._build_system_prompt()
         if notifications:
             system_prompt += f"\n\n{notifications}"
-        history_messages = session.get_history(max_messages=0)
+        history_messages = session.get_history()
 
         messages = [
             SystemMessage(content=system_prompt),
@@ -98,6 +96,7 @@ class CapricornGraph:
             return "LLM 客户端未初始化"
 
         tools_used = []
+        i = -1
 
         try:
             for i in range(self.max_iterations):
@@ -105,7 +104,16 @@ class CapricornGraph:
                 logger.info(f"Thinking... (iteration {i + 1})")
                 trace.round_start(i + 1, len(messages))
 
-                response = await self._llm_with_tools.ainvoke(messages)
+                try:
+                    response = await self._llm_with_tools.ainvoke(messages)
+                except Exception as invoke_err:
+                    err_str = str(invoke_err)
+                    if "429" in err_str or "rate" in err_str.lower():
+                        logger.warning(f"Rate limited, retrying in 3s...")
+                        await asyncio.sleep(3)
+                        response = await self._llm_with_tools.ainvoke(messages)
+                    else:
+                        raise
                 messages.append(response)
 
                 response_content = self._extract_content(response)
@@ -173,7 +181,9 @@ class CapricornGraph:
 
         except Exception as e:
             logger.error(f"Agent execution failed: {e}")
-            return f"执行失败: {str(e)}"
+            session.add_message("assistant", "执行失败，请稍后重试")
+            self.session_manager.save_session(session)
+            return "执行失败，请稍后重试"
 
     async def _execute_tools(self, tool_calls, round: int = 0) -> list:
         async def _run_one(call):
@@ -220,9 +230,13 @@ class CapricornGraph:
         elif role == "system":
             return SystemMessage(content=content)
         elif role == "tool":
+            tool_call_id = msg.get("tool_call_id", "")
+            if not tool_call_id:
+                logger.warning(f"Dropping tool message with empty tool_call_id: {content[:80]}")
+                return HumanMessage(content=f"[orphan tool result] {content[:200]}")
             return ToolMessage(
                 content=content,
-                tool_call_id=msg.get("tool_call_id", ""),
+                tool_call_id=tool_call_id,
             )
         else:
             ai_msg = AIMessage(content=content)
@@ -250,49 +264,51 @@ class CapricornGraph:
         if self.system_prompt_override:
             return self.system_prompt_override
 
-        builder = PromptBuilder(self.system_prompt_path)
-
         workspace_root = getattr(
             getattr(self.session_manager, "workspace", None), "root", "./workspace"
         )
-
         sandbox_note = "（沙盒模式：路径限制在工作区内）" if self.sandbox else "（可访问工作区外的路径）"
-        builder.set("workspace_section", (
+        workspace_section = (
             f"# Workspace\n\n"
             f"工作区根目录：`{workspace_root}` {sandbox_note}\n"
-            f"所有工具（read_file、write_file、list_files、exec）都以工作区根目录为基准。\n"
-            f"路径直接写相对路径，例如 `main/my-task/index.html`。"
-            f" 不要加 `{workspace_root}/` 前缀。\n\n"
+            f"所有工具（read_file、write_file、list_files、exec）都以工作区根目录为基准。"
+            f" 路径直接写相对路径，不要加 `{workspace_root}/` 前缀。\n\n"
+            f"```\n"
+            f"workspace/\n"
+            f"├── main/<任务名>/    任务产出，每个任务一个文件夹\n"
+            f"├── team/            SubAgent 协作空间\n"
+            f"│   ├── reports/     executor 产出\n"
+            f"│   ├── audit/       verifier 审核\n"
+            f"│   ├── summary/     质量汇总\n"
+            f"│   ├── quality_signals/  质量信号\n"
+            f"│   └── changelog/        变更日志\n"
+            f"├── memory/          系统记忆（自动管理）\n"
+            f"└── sessions/        会话记录（自动管理）\n"
+            f"```\n\n"
             f"规则：\n"
-            f"- 任务文件放在 `main/<任务名>/` 下，每个任务一个独立文件夹。\n"
-            f"- `exec` 执行命令时默认在工作区根目录下运行。"
-            f" 所以 `python main/my-task/app.py` 能直接找到文件。\n"
-            f"- 操作前先用 `list_files` 查看工作区结构。"
-        ))
+            f"- 任务产出 → `main/<任务名>/`，每个任务一个独立文件夹\n"
+            f"- 项目配置（requirements.md 等）→ `main/<当前项目>/` 下\n"
+            f"- SubAgent 产出 → `team/reports/` 或 `team/summary/`\n"
+            f"- `memory/` 和 `sessions/` 由系统自动管理，不要手动写入\n"
+            f"- `exec` 默认在工作区根目录下运行\n"
+            f"- 操作前先用 `list_files` 查看当前结构\n"
+            f"- 禁止嵌套 `main/main/`，`main/` 只出现一次"
+        )
 
-        # 历史摘要
-        history_lines = self.history_log.read(limit=10) if self.history_log else []
-        history_section = ""
-        if history_lines:
-            history_section = (
-                "# Recent History\n\n近期对话摘要：\n\n"
-                + "\n".join(f"- {line}" for line in history_lines)
-            )
-
-        builder.set("memory_section", build_memory_section(self.long_term_memory))
-        builder.set("history_section", history_section)
-
-        # agent.md 项目概述（CWD 相对：跟随启动目录，允许多项目共享同一 agent 进程）
         agent_md_section = ""
         agent_md_path = Path("agent.md")
         if agent_md_path.exists():
             content = agent_md_path.read_text(encoding="utf-8").strip()
             if content:
                 agent_md_section = f"# Project Context\n\n{content}"
-        builder.set("agent_md_section", agent_md_section)
 
-        builder.set("tools_section", build_tools_section(self.capability_registry))
-        builder.set("skills_section", build_skills_section(self.skill_manager))
-        builder.set("current_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-
-        return builder.build()
+        return build_prompt(
+            self.system_prompt_path,
+            workspace_section=workspace_section,
+            bia_section=build_bia_section(self.bia_path),
+            memory_section=build_memory_section(self.long_term_memory),
+            agent_md_section=agent_md_section,
+            tools_section=build_tools_section(self.capability_registry),
+            skills_section=build_skills_section(self.skill_manager),
+            current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )

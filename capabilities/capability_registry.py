@@ -110,9 +110,6 @@ class CapabilityRegistry:
             tool = SkillViewTool(skill_manager)
             self.tools.register(tool, layer="builtin")
 
-    async def execute_tool(self, name: str, params: Dict[str, Any]) -> Any:
-        return await self.tools.execute(name, params)
-
     def get_langchain_tools(self) -> list:
         return self.tools.get_langchain_tools()
 

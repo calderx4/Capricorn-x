@@ -29,7 +29,11 @@ class SkillViewTool(BaseTool):
         if not available:
             return "No skills available."
 
-        names = ", ".join(available.keys())
+        # 只展示无命名空间的简洁名（default 垂类的 skills 同时保留两种 key）
+        display_names = [k for k in available.keys() if "." not in k]
+        if not display_names:
+            display_names = list(available.keys())
+        names = ", ".join(sorted(display_names))
         return (
             "按需加载技能（Skill）的完整指令。技能是针对特定领域（前端开发、文档生成等）的专业化指导包。\n"
             "触发场景：用户请求匹配某个技能领域时，必须先调用此工具加载完整指令后再执行任务。\n"
@@ -54,6 +58,9 @@ class SkillViewTool(BaseTool):
 
         if not skill_name:
             return "Error: skill name is required"
+
+        if "/" in skill_name or ".." in skill_name:
+            return "Error: 技能名称不能包含路径分隔符"
 
         content = self._skill_manager.load_skill(skill_name)
         if content.startswith("Error:"):

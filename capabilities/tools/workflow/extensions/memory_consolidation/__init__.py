@@ -2,6 +2,6 @@
 Memory Consolidation Workflow
 """
 
-from .workflow import MemoryConsolidationWorkflow
+from capabilities.tools.workflow.extensions.memory_consolidation.workflow import MemoryConsolidationWorkflow
 
 __all__ = ["MemoryConsolidationWorkflow"]

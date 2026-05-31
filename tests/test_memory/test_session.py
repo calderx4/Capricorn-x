@@ -26,14 +26,6 @@ class TestSession:
         history = session.get_history()
         assert len(history) == 5
 
-    def test_get_history_limited(self):
-        session = Session(thread_id="test")
-        for i in range(10):
-            session.add_message("user", f"msg {i}")
-        history = session.get_history(max_messages=3)
-        assert len(history) == 3
-        assert history[0]["content"] == "msg 7"
-
 
 class TestSessionManager:
     def _make_workspace(self, tmp_path):

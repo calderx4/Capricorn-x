@@ -83,8 +83,10 @@ class ExecTool(BaseTool):
         try:
             logger.debug(f"Executing command: {command} (cwd={effective_cwd})")
 
-            proc = await asyncio.create_subprocess_shell(
-                command,
+            import shlex
+            parts = shlex.split(command)
+            proc = await asyncio.create_subprocess_exec(
+                *parts,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=effective_cwd
