@@ -27,14 +27,16 @@ def _resolve_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
 class MCPClientManager:
     """MCP 客户端管理器"""
 
-    def __init__(self, mcp_servers: Dict[str, MCPServerConfig]):
+    def __init__(self, mcp_servers: Dict[str, MCPServerConfig], workspace_root: str = None):
         """
         初始化 MCP 客户端管理器
 
         Args:
             mcp_servers: MCP 服务器配置字典
+            workspace_root: 工作区根目录（用于 MCP 工具路径解析）
         """
         self.mcp_servers = mcp_servers
+        self._workspace_root = workspace_root
         self._stack: AsyncExitStack = None
 
     async def connect(self, registry: ToolRegistry, layer: str = "mcp") -> int:
@@ -141,7 +143,7 @@ class MCPClientManager:
                         continue
 
                     # 创建工具包装器并注册
-                    wrapper = MCPToolWrapper(session, name, tool_def, tool_timeout=cfg.tool_timeout, lock=server_lock)
+                    wrapper = MCPToolWrapper(session, name, tool_def, tool_timeout=cfg.tool_timeout, lock=server_lock, workspace_root=self._workspace_root)
                     registry.register(wrapper, layer=layer)
                     registered_count += 1
 

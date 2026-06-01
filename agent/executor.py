@@ -304,7 +304,8 @@ class CapricornAgent:
         if llm_config.api_base:
             logger.debug(f"Using custom API base: {llm_config.api_base}")
 
-    async def chat(self, user_input: str, thread_id: str = "default") -> str:
+    async def chat(self, user_input: str, thread_id: str = "default",
+                   images: list = None, attachments: list = None) -> str:
         if not self.graph:
             raise RuntimeError("Agent not initialized")
 
@@ -331,7 +332,10 @@ class CapricornAgent:
                 )
                 unread_ids = [n["id"] for n in unread]
 
-        response = await self.graph.run(user_input, thread_id, notifications=notifications)
+        response = await self.graph.run(
+            user_input, thread_id, notifications=notifications,
+            images=images, attachments=attachments,
+        )
 
         if unread_ids:
             await self._notification_bus.mark_read(unread_ids)

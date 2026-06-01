@@ -54,3 +54,26 @@ class TestCheckCommand:
         # "dd" 不应匹配 "docker dd"——首词是 docker
         allowed, reason = check_command("docker dd something", ["dd"])
         assert allowed is True
+
+
+class TestCheckCommandMultiWord:
+    def test_multi_word_blocklist_matches(self):
+        allowed, reason = check_command("rm -rf /", ["rm -rf /"])
+        assert allowed is False
+
+    def test_multi_word_blocklist_matches_as_substring(self):
+        allowed, reason = check_command("rm -rf / --no-preserve-root", ["rm -rf /"])
+        assert allowed is False
+
+    def test_multi_word_blocklist_no_false_positive(self):
+        # "rm -rf /" 不应拦截 "rm file.txt"
+        allowed, reason = check_command("rm file.txt", ["rm -rf /"])
+        assert allowed is True
+
+    def test_dd_if_pattern(self):
+        allowed, reason = check_command("dd if=/dev/zero of=/dev/sda", ["dd if="])
+        assert allowed is False
+
+    def test_multi_word_case_insensitive(self):
+        allowed, reason = check_command("RM -RF /", ["rm -rf /"])
+        assert allowed is False

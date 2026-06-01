@@ -263,31 +263,31 @@ class TestTaskUpdateInvalidTransitions:
         tool = _make_tool(str(tmp_path))
         task = _reach_status(tool, "done")
         result = tool._update({"task_id": task["id"], "status": "running"})
-        assert "不允许" in result
+        assert "无法" in result
 
     def test_done_to_error_rejected(self, tmp_path):
         tool = _make_tool(str(tmp_path))
         task = _reach_status(tool, "done")
         result = tool._update({"task_id": task["id"], "status": "error"})
-        assert "不允许" in result
+        assert "无法" in result
 
     def test_producing_to_done_rejected(self, tmp_path):
         tool = _make_tool(str(tmp_path))
         task = _create_task(tool)
         result = tool._update({"task_id": task["id"], "status": "done"})
-        assert "不允许" in result
+        assert "无法" in result
 
     def test_producing_to_error_rejected(self, tmp_path):
         tool = _make_tool(str(tmp_path))
         task = _create_task(tool)
         result = tool._update({"task_id": task["id"], "status": "error"})
-        assert "不允许" in result
+        assert "无法" in result
 
     def test_running_to_producing_rejected(self, tmp_path):
         tool = _make_tool(str(tmp_path))
         task = _reach_status(tool, "running")
         result = tool._update({"task_id": task["id"], "status": "producing"})
-        assert "不允许" in result
+        assert "无法" in result
 
     def test_invalid_task_id_format(self, tmp_path):
         tool = _make_tool(str(tmp_path))
@@ -297,7 +297,7 @@ class TestTaskUpdateInvalidTransitions:
     def test_nonexistent_task_id(self, tmp_path):
         tool = _make_tool(str(tmp_path))
         result = tool._update({"task_id": "task_00000000", "status": "running"})
-        assert "不存在" in result
+        assert "无法" in result
 
     def test_update_without_status(self, tmp_path):
         tool = _make_tool(str(tmp_path))

@@ -24,6 +24,12 @@ def _make_config(tmp_path):
 def _make_scheduler(tmp_path):
     config = _make_config(tmp_path)
     s = CronScheduler(config)
+    # Override GATEWAY_DIR-based paths to use tmp_path for isolation
+    gw = tmp_path / "gateway"
+    s.jobs_path = gw / "jobs.json"
+    s.lock_path = gw / ".tick.lock"
+    s.output_dir = gw / "output"
+    s.workspaces_dir = gw / "workspaces"
     # Set attributes that initialize() would normally set
     s._notification_bus = None
     s._capability_registry = None

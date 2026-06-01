@@ -13,6 +13,7 @@ Gateway - HTTP 服务
 """
 
 import asyncio
+import base64
 import hmac
 import json
 import os
@@ -35,6 +36,7 @@ MAX_PROMPT_LENGTH = 50000
 MAX_CONCURRENT_TASKS = 20
 MAX_TASK_TIMEOUT = 3600  # 单个异步任务最长 1 小时
 MAX_SSE_CLIENTS = 50
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 单文件上传上限 50MB
 TASK_ID_RE = re.compile(r'^[0-9a-f]{8}$')
 THREAD_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 
@@ -73,9 +75,10 @@ class Gateway:
         if self._api_key:
             middlewares.append(self._make_auth_middleware())
 
-        app = web.Application(middlewares=middlewares)
+        app = web.Application(middlewares=middlewares, client_max_size=30 * 1024 * 1024)
         app.add_routes([
             web.post("/chat", self._handle_chat),
+            web.post("/upload", self._handle_upload),
             web.post("/task", self._handle_task_create),
             web.get("/task/{task_id}", self._handle_task_status),
             web.get("/sessions", self._handle_sessions),
@@ -151,14 +154,89 @@ class Gateway:
         if not THREAD_ID_RE.fullmatch(thread_id):
             return web.json_response({"error": "Invalid thread_id"}, status=400)
 
+        images = body.get("images", [])
+        attachments = body.get("attachments", [])
+
+        # 类型校验
+        if not isinstance(images, list) or not isinstance(attachments, list):
+            return web.json_response({"error": "images and attachments must be arrays"}, status=400)
+        for img in images:
+            if not isinstance(img, dict) or "base64" not in img:
+                return web.json_response({"error": "Each image must be a dict with 'base64' key"}, status=400)
+
+        # 校验 images 数量和大小
+        if len(images) > 10:
+            return web.json_response({"error": "Too many images (max 10)"}, status=400)
+        # 计算 base64 解码后的实际字节大小
+        total_image_size = sum(len(img.get("base64", "")) * 3 // 4 for img in images)
+        if total_image_size > 20 * 1024 * 1024:
+            return web.json_response({"error": "Images too large (max 20MB total)"}, status=400)
+
         try:
             lock = self._get_thread_lock(thread_id)
             async with lock:
-                response = await self.agent.chat(prompt, thread_id=thread_id)
+                response = await self.agent.chat(
+                    prompt, thread_id=thread_id,
+                    images=images, attachments=attachments,
+                )
             return web.json_response({"response": response})
         except Exception as e:
             logger.error(f"/chat error: {e}")
             return web.json_response({"error": "Internal server error"}, status=500)
+
+    async def _handle_upload(self, request: web.Request) -> web.Response:
+        """POST /upload — 上传文件到 workspace"""
+        upload_dir = Path(self.agent.config.workspace.root) / "main" / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        results = []
+        try:
+            reader = await request.multipart()
+        except Exception:
+            return web.json_response({"error": "Invalid multipart request"}, status=400)
+
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if not part.name or not part.filename:
+                continue
+            data = await part.read(decode=True)
+            if len(data) > MAX_UPLOAD_SIZE:
+                logger.warning(f"Upload skipped (too large): {part.filename} ({len(data)} bytes)")
+                results.append({
+                    "filename": part.filename,
+                    "status": "skipped",
+                    "error": f"File too large ({len(data)} bytes, max {MAX_UPLOAD_SIZE})",
+                })
+                continue
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            raw_name = Path(part.filename).name  # 去掉路径组件
+            rand_suffix = uuid.uuid4().hex[:4]
+            safe_name = f"{ts}_{rand_suffix}_{raw_name}"
+            dest = upload_dir / safe_name
+            # 安全校验：确保写入路径在 upload_dir 内
+            if not dest.resolve().is_relative_to(upload_dir.resolve()):
+                logger.warning(f"Upload rejected (path escape): {part.filename}")
+                continue
+            dest.write_bytes(data)
+
+            content_type = part.headers.get("Content-Type", "") or ""
+            is_image = content_type.startswith("image/")
+            result = {
+                "filename": part.filename,
+                "saved_as": safe_name,
+                "path": f"main/uploads/{safe_name}",
+                "size": len(data),
+                "is_image": is_image,
+            }
+            if is_image:
+                result["base64"] = base64.b64encode(data).decode()
+                result["content_type"] = content_type
+            results.append(result)
+            logger.info(f"Uploaded: {part.filename} -> {safe_name} ({len(data)} bytes)")
+
+        return web.json_response({"files": results})
 
     async def _handle_task_create(self, request: web.Request) -> web.Response:
         """POST /task"""

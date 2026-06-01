@@ -39,3 +39,9 @@ class LongTermMemory:
         except Exception as e:
             logger.error(f"Failed to write long term memory: {e}")
             raise
+
+    def append(self, content: str) -> None:
+        """追加内容到长期记忆"""
+        existing = self.read()
+        separator = "\n\n" if existing and not existing.endswith("\n") else ""
+        self.write(existing + separator + content)

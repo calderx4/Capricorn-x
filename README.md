@@ -1,6 +1,6 @@
 # Capricorn-x
 
-> v0.2.6 | 原生 Function Calling 驱动的轻量级通用 Agent Runtime
+> v0.2.7 | 原生 Function Calling 驱动的轻量级通用 Agent Runtime
 
 轻量级 Agent Runtime。不约束 LLM 怎么做，只告诉它有什么能用，让它自己规划和决策。
 
@@ -45,10 +45,14 @@ LLM 越强，Capricorn 越薄。不硬编码业务规则，不规定步骤数，
   ▼
 Gateway（aiohttp, Auth, SSE）
   │
+  ├── POST /upload — 文件上传（保存到 workspace）
+  ├── POST /chat   — 对话（支持图片多模态）
+  │
   ▼
 Capricorn Agent
   │
   ├── FC 循环      — LLM → tool_calls → execute → repeat
+  ├── 多模态       — 图片通过 base64 注入 LLM 原生视觉
   ├── 三层工具      — builtin / MCP / workflow，自动发现
   ├── Agent Teams   — spawn executor / verifier，LLM 自己决定是否需要
   ├── Cron          — 定时任务，支持角色配置
@@ -98,13 +102,15 @@ Capricorn Agent
 | 能力 | 说明 |
 |------|------|
 | FC 循环 | LLM → tool_calls → execute，无 ReAct，无状态机 |
+| 多模态 | WebUI 上传图片 → base64 注入 LLM 原生视觉理解 |
+| 文件上传 | WebUI 上传文件 → 自动保存到 workspace，Agent 用工具读取 |
 | 三层工具 | builtin / MCP / workflow，自动发现注册 |
 | Agent Teams | spawn executor / verifier，LLM 自主决策 |
 | Cron | 定时调度，支持角色配置，SSE 推送结果 |
 | 三层记忆 | session + MEMORY.md + HISTORY.md，自动整合 |
 | BIA 自进化 | 行为规则管理（去重、压缩、上限） |
 | 技能系统 | autoload + on-demand，按需加载领域技能 |
-| Gateway API | HTTP + SSE + 多会话 + 认证 |
+| Gateway API | HTTP + SSE + 多会话 + 认证 + 文件上传 |
 
 ---
 

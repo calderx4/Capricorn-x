@@ -6,17 +6,22 @@ MCP Tool Wrapper - MCP 工具包装器
 """
 
 import asyncio
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, Set
 from loguru import logger
 
 from core.base_tool import BaseTool
+
+# 参数名中暗示包含文件路径的关键词
+_PATH_KEYWORDS: Set[str] = {"path", "file", "filepath", "filename", "source",
+                             "image", "image_source", "url", "uri", "directory", "dir"}
 
 
 class MCPToolWrapper(BaseTool):
     """MCP 工具包装器"""
 
     def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30,
-                 lock: asyncio.Lock = None):
+                 lock: asyncio.Lock = None, workspace_root: str = None):
         """
         初始化 MCP 工具包装器
 
@@ -26,6 +31,7 @@ class MCPToolWrapper(BaseTool):
             tool_def: 工具定义
             tool_timeout: 超时时间（秒）
             lock: 同一 server 的共享锁（防止并发调用协议帧交叉）
+            workspace_root: 工作区根目录（用于相对路径解析）
         """
         self._session = session
         self._original_name = tool_def.name
@@ -38,6 +44,7 @@ class MCPToolWrapper(BaseTool):
         self._parameters = self._normalize_schema(raw_schema)
         self._tool_timeout = tool_timeout
         self._lock = lock
+        self._workspace_root = workspace_root
 
     @property
     def name(self) -> str:
@@ -53,6 +60,7 @@ class MCPToolWrapper(BaseTool):
 
     async def execute(self, **kwargs: Any) -> str:
         """执行 MCP 工具（通过共享锁串行化同一 server 的并发调用）"""
+        kwargs = self._resolve_paths(kwargs)
         async def _call():
             return await asyncio.wait_for(
                 self._session.call_tool(self._original_name, arguments=kwargs),
@@ -72,6 +80,35 @@ class MCPToolWrapper(BaseTool):
         except Exception as exc:
             logger.error(f"MCP tool '{self._name}' failed: {exc}")
             return f"Error: MCP tool call failed: {type(exc).__name__}: {str(exc)}"
+
+    def _resolve_paths(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        解析 MCP 工具参数中的相对路径为绝对路径。
+
+        仅对参数名含 path/file/source/image 等关键词的参数进行解析，
+        且仅当 workspace_root / relative_path 实际存在时才替换。
+        不修改 URL、data URI、绝对路径等。
+        """
+        if not self._workspace_root or not kwargs:
+            return kwargs
+
+        resolved = dict(kwargs)
+        for key, value in kwargs.items():
+            if not isinstance(value, str):
+                continue
+            # 仅检查参数名暗示路径的参数
+            key_lower = key.lower()
+            if not any(hint in key_lower for hint in _PATH_KEYWORDS):
+                continue
+            # 跳过 URL、data URI、绝对路径、home 路径
+            if value.startswith(("http://", "https://", "data:", "/", "~")):
+                continue
+            # 尝试 resolve
+            candidate = Path(self._workspace_root) / value
+            if candidate.exists():
+                resolved[key] = str(candidate.resolve())
+                logger.debug(f"MCP path resolved: {key}={value} -> {resolved[key]}")
+        return resolved
 
     def _normalize_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """

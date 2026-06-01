@@ -69,7 +69,9 @@ class CapricornGraph:
             self._llm_with_tools = None
             logger.warning("LLM client not initialized")
 
-    async def run(self, user_input: str, thread_id: str = "default", notifications: str = "") -> str:
+    async def run(self, user_input: str, thread_id: str = "default",
+                  notifications: str = "", images: list = None,
+                  attachments: list = None) -> str:
         """运行 FC 循环"""
         logger.info(f"Running agent with thread_id: {thread_id}")
 
@@ -80,13 +82,49 @@ class CapricornGraph:
             system_prompt += f"\n\n{notifications}"
         history_messages = session.get_history()
 
+        # 构建 prompt 文本（附加文件信息）
+        prompt_text = user_input
+        if attachments:
+            file_list = "\n".join(f"- {a}" for a in attachments)
+            prompt_text += f"\n\n[用户上传了以下文件]\n{file_list}"
+            if images:
+                prompt_text += (
+                    "\n图片已直接传入你的视觉，直接看图回答。"
+                    "\n仅当模型自身没有多模态能力时，才调用图像识别工具兜底。"
+                    "\n如果都不行，告知用户当前没有识别图片的能力。"
+                    "\n其他非图片文件请用 read_file 等工具读取。"
+                )
+            else:
+                prompt_text += "\n请根据需要使用 read_file 等工具读取文件内容。"
+
+        # 构造 HumanMessage（支持多模态）
+        if images:
+            content = [{"type": "text", "text": prompt_text}]
+            for img in images:
+                # 支持 dict {"base64": ..., "content_type": ...} 或纯 base64 字符串
+                if isinstance(img, dict):
+                    img_b64 = img["base64"]
+                    mime = img.get("content_type", "image/png")
+                else:
+                    img_b64 = img
+                    mime = "image/png"
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{img_b64}"}
+                })
+            human_msg = HumanMessage(content=content)
+        else:
+            human_msg = HumanMessage(content=prompt_text)
+
         messages = [
             SystemMessage(content=system_prompt),
             *[self._dict_to_message(msg) for msg in history_messages],
-            HumanMessage(content=user_input),
+            human_msg,
         ]
 
-        session.add_message("user", user_input)
+        session.add_message("user", prompt_text,
+                            images_count=len(images or []),
+                            attachments=attachments or [])
 
         # 记录本轮输入的 messages 结构
         logger.debug(f"[Trace] 输入 messages 结构: {self._summarize_messages(messages)}")
@@ -218,7 +256,12 @@ class CapricornGraph:
         for idx, msg in enumerate(messages):
             role = type(msg).__name__
             content = getattr(msg, "content", "")
-            preview = content[:80].replace("\n", " ") if content else "(empty)"
+            if isinstance(content, list):
+                preview = f"[multimodal: {len(content)} blocks]"
+            elif content:
+                preview = content[:80].replace("\n", " ")
+            else:
+                preview = "(empty)"
             summary.append(f"  [{idx}] {role}: {preview}...")
         return f"共 {len(messages)} 条:\n" + "\n".join(summary)
 

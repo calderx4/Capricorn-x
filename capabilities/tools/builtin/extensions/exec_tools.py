@@ -41,6 +41,7 @@ class ExecTool(BaseTool):
     def description(self) -> str:
         return (
             "执行 shell 命令，返回 stdout/stderr/exit code。适用场景：运行脚本、安装包、git 操作、编译、测试。\n"
+            "支持 shell 特性：管道 (|)、重定向 (>/>>)、组合命令 (&&/||/;)、变量展开 ($VAR)、命令替换 ($(...))。\n"
             "参数：cwd（工作目录）、timeout（超时秒数，默认30，最大120）。"
         )
 
@@ -83,10 +84,8 @@ class ExecTool(BaseTool):
         try:
             logger.debug(f"Executing command: {command} (cwd={effective_cwd})")
 
-            import shlex
-            parts = shlex.split(command)
-            proc = await asyncio.create_subprocess_exec(
-                *parts,
+            proc = await asyncio.create_subprocess_shell(
+                command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=effective_cwd

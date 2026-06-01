@@ -92,7 +92,7 @@ class CapabilityRegistry:
     async def _register_mcp_tools(self, mcp_servers: Dict[str, Any]):
         from capabilities.tools.mcp.mcp_client import MCPClientManager
 
-        self._mcp_manager = MCPClientManager(mcp_servers)
+        self._mcp_manager = MCPClientManager(mcp_servers, workspace_root=self._workspace_root)
         await self._mcp_manager.connect(self.tools, layer="mcp")
 
     async def _register_workflow_tools(self):

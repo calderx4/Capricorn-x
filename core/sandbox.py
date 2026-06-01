@@ -32,6 +32,10 @@ def check_command(command: str, blocked_commands: list[str]) -> tuple[bool, str]
     """
     检查命令是否在黑名单中。
 
+    匹配规则：
+    1. 首词精确匹配（单词条目如 "rm"、"mkfs"）
+    2. 多词条目在整个命令中子串匹配（如 "rm -rf /"、"dd if="）
+
     Returns:
         (allowed, reason)
     """
@@ -41,7 +45,16 @@ def check_command(command: str, blocked_commands: list[str]) -> tuple[bool, str]
     except ValueError:
         parts = command.split()
     base = parts[0].lower() if parts else ""
+    command_lower = command.lower()
+
     for blocked in blocked_commands:
-        if base == blocked.lower():
+        blocked_lower = blocked.lower().strip()
+        if not blocked_lower:
+            continue
+        # 首词精确匹配（单词条目，如 "rm" 匹配 "rm file.txt"）
+        if base == blocked_lower:
             return False, f"Blocked command: '{blocked}'"
+        # 多词条目：在整个命令中子串匹配（如 "rm -rf /" 匹配 "rm -rf / --no-preserve-root"）
+        if " " in blocked_lower and blocked_lower in command_lower:
+            return False, f"Blocked command pattern: '{blocked}'"
     return True, ""

@@ -37,13 +37,12 @@ def build_prompt(template_path: str, **sections: str) -> str:
     # 还原转义
     result = result.replace("<<", "{{").replace(">>", "}}")
     return result
-    return result
 
 
 LAYER_DESC_MAP = {
     "tools": "## Tools（原子操作）\n确定性原子操作 — 文件读写、命令执行、任务管理等基础能力。",
     "workflow": "## Workflows（代码编排）\n代码约束的多步编排任务，按固定流程调用多个工具协作完成。",
-    "mcp": "## MCP（外部服务）\n通过 MCP 协议接入的外部服务（搜索、图像理解等），按需调用。",
+    "mcp": "## MCP（外部服务）\n通过 MCP 协议接入的外部服务（搜索、图像理解等），按需调用。\n注意：图像类工具请传入绝对路径或 base64 data URI，不要传入相对路径。",
 }
 
 

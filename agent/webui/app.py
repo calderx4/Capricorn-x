@@ -102,14 +102,28 @@ def _remove(tid):
         st.session_state.messages = []
 
 
-def _send(prompt):
-    resp = _post("/chat", {"prompt": prompt, "thread_id": st.session_state.current_thread_id}, timeout=500)
+def _send(prompt, images=None, attachments=None):
+    payload = {"prompt": prompt, "thread_id": st.session_state.current_thread_id}
+    if images:
+        payload["images"] = images
+    if attachments:
+        payload["attachments"] = attachments
+    resp = _post("/chat", payload, timeout=500)
     if resp and resp.status_code == 200:
         data = resp.json()
         return data.get("response") if not data.get("error") else f"**错误:** {data['error']}"
     elif resp:
         return f"**错误:** {resp.json().get('error', '未知错误')}"
     return "**连接失败:** Gateway 未启动"
+
+
+def _upload_files(files):
+    """上传文件到 gateway，返回响应"""
+    try:
+        multipart_files = [("files", (f.name, f.getvalue(), f.type)) for f in files]
+        return requests.post(f"{API_BASE}/upload", files=multipart_files, timeout=30)
+    except Exception:
+        return None
 
 
 if not st.session_state.session_loaded:
@@ -213,16 +227,46 @@ with st.sidebar:
 
 # ── 主内容区 ────────────────────────────────────────
 
-prompt = st.chat_input("输入消息...")
+chat_response = st.chat_input("输入消息...", accept_file="multiple")
 
-if prompt:
-    st.session_state.messages.append({"role": "user", "content": prompt})
+if chat_response:
+    prompt = chat_response.text or ""
+    if not prompt.strip() and not chat_response.files:
+        st.stop()
+
+    images = []
+    attachments = []
+
+    # 上传文件到 gateway
+    if chat_response.files:
+        upload_resp = _upload_files(chat_response.files)
+        if upload_resp and upload_resp.status_code == 200:
+            for f_info in upload_resp.json().get("files", []):
+                attachments.append(f_info["path"])
+                if f_info.get("base64"):
+                    images.append({
+                        "base64": f_info["base64"],
+                        "content_type": f_info.get("content_type", "image/png"),
+                    })
+                # 显示上传文件信息
+                st.session_state.messages.append({
+                    "role": "user",
+                    "content": f"📎 {f_info['filename']}"
+                })
+        else:
+            st.session_state.messages.append({
+                "role": "user",
+                "content": "⚠️ 文件上传失败"
+            })
+
+    if prompt.strip():
+        st.session_state.messages.append({"role": "user", "content": prompt})
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
     with st.chat_message("assistant"):
         with st.spinner("思考中..."):
-            response = _send(prompt)
+            response = _send(prompt, images=images, attachments=attachments)
         st.markdown(response)
     st.session_state.messages.append({"role": "assistant", "content": response})
     st.rerun()
