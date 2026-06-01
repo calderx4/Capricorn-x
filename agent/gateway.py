@@ -24,6 +24,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict
 
+from core.paths import GATEWAY_DIR
+
 from aiohttp import web
 from loguru import logger
 
@@ -58,7 +60,7 @@ class Gateway:
         self.host = config.gateway.host
         self.port = config.gateway.port
         self.start_time = time.time()
-        self.tasks_dir = Path(__file__).resolve().parent.parent / "gateway" / "tasks"
+        self.tasks_dir = GATEWAY_DIR / "tasks"
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self._running_tasks: Dict[str, asyncio.Task] = {}
         self._thread_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()

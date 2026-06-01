@@ -1,11 +1,8 @@
 """
 Quality Tools — 质量检查与质量信号工具
 
-自进化基础设施的一部分：
-- QualityCheckTool: 按预设标准检查产出质量（纯正则，不调 LLM）
+- QualityCheckTool: LLM 驱动的产出质量评估（4 维度收敛评估）
 - QualitySignalTool: 记录和查询质量信号
-
-垂类可在自己的 quality_tools.py 中覆盖模块级变量来增加领域维度。
 """
 
 import json
@@ -19,54 +16,55 @@ from loguru import logger
 from core.base_tool import BaseTool
 from core.utils import atomic_write
 
+# ── LLM 评估 prompt ─────────────────────────────────────────
 
-# ── V1 通用检查规则（垂类可覆盖） ────────────────────────────
+EVALUATION_PROMPT = """\
+你是一个严格的质量验收员。按照以下 4 个固定维度评估产出的质量。
 
-# 默认值：空列表表示不做该维度检查。垂类可在自己的 quality_tools.py 中覆盖。
-SECTION_HEADINGS: list = []
-COMPARISON_WORDS: list = []
-ANOMALY_WORDS: list = []
+## 评估维度
 
-NUMBER_PATTERN = re.compile(r"\d+\.?\d*%?")
-HEADING_PATTERN = re.compile(r"^#{1,6}\s+", re.MULTILINE)
-MIN_LENGTH = 100
+1. **task_completion（任务完成度）**
+   通过：产出完整回应了任务要求，所有要点都被覆盖
+   失败：有明确的遗漏或未完成的要求
 
+2. **accuracy（内容准确性）**
+   通过：信息具体、有事实支撑，无明显错误或臆造
+   失败：内容模糊笼统，或包含可识别的事实错误
 
-def _check_report(content: str) -> Dict[str, Any]:
-    """对产出文本执行 V1 自动检查。"""
-    details: Dict[str, Any] = {
-        "has_numbers": len(NUMBER_PATTERN.findall(content)) >= 2,
-        "has_headings": bool(HEADING_PATTERN.search(content)),
-        "min_length": len(content.strip()) >= MIN_LENGTH,
-    }
-    if SECTION_HEADINGS:
-        details["section_complete"] = all(h in content for h in SECTION_HEADINGS)
-    if COMPARISON_WORDS:
-        details["has_comparison"] = any(w in content for w in COMPARISON_WORDS)
-    if ANOMALY_WORDS:
-        details["has_anomaly"] = any(w in content for w in ANOMALY_WORDS)
-    fail_items = [k for k, v in details.items() if not v]
-    return {
-        "pass": len(fail_items) == 0,
-        "details": details,
-        "fail_count": len(fail_items),
-        "fail_items": fail_items,
-    }
+3. **structure（结构清晰度）**
+   通过：有标题/分段/列表等结构化元素，逻辑清晰可读
+   失败：大段文字堆砌，缺少结构，逻辑混乱
+
+4. **actionability（可操作性）**
+   通过：有明确的结论、建议或下一步行动
+   失败：没有结论或建议，读者不知道下一步做什么
+
+## 评估规则
+
+- 严格按维度逐项评估，禁止整体模糊判断
+- 每个维度必须给出通过或失败，不存在"部分通过"
+- 失败时必须说明具体原因（一两句话）
+- 产出为空或极短（<50字）时，所有维度判定失败
+- 不要给维度加注释或额外字段
+
+## 输出格式
+
+严格输出以下 JSON，不要输出其他内容：
+{"pass":true或false,"details":{"task_completion":{"pass":true或false,"reason":"..."},"accuracy":{"pass":true或false,"reason":"..."},"structure":{"pass":true或false,"reason":"..."},"actionability":{"pass":true或false,"reason":"..."}},"fail_items":["失败的维度名",...],"fail_count":数字}
+
+"pass" = 4个维度全部通过才为 true。"""
 
 
 # ── QualityCheckTool ─────────────────────────────────────────
 
 
 class QualityCheckTool(BaseTool):
-    """按预设标准检查产出质量"""
+    """LLM 驱动的产出质量评估"""
 
-    def __init__(self, workspace_root: str = "./workspace", sandbox: bool = True):
-        self._workspace_root = workspace_root
-        self._sandbox = sandbox
+    auto_discover = False
 
-    @classmethod
-    def from_config(cls, config: dict) -> "QualityCheckTool":
-        return cls(config["workspace_root"], config.get("sandbox", True))
+    def __init__(self, llm_client):
+        self._llm_client = llm_client
 
     @property
     def name(self) -> str:
@@ -75,11 +73,10 @@ class QualityCheckTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "检查产出质量（V1 自动检查）。适用场景：执行 Cron 产出后自检，"
-            "或监督 Cron 扫描历史产出。\n"
-            "通用检查项：有标题结构、有具体数字（≥2）、内容长度（≥100字符）。\n"
-            "垂类可扩展：SECTION_HEADINGS / COMPARISON_WORDS / ANOMALY_WORDS。\n"
-            "输入产出文本，返回 pass/fail 及各维度详情。"
+            "评估产出质量（LLM 驱动的 4 维度检查）。"
+            "维度：task_completion（任务完成度）、accuracy（准确性）、"
+            "structure（结构清晰度）、actionability（可操作性）。"
+            "传入产出文本和原始任务描述，返回 pass/fail 及各维度详情。"
         )
 
     @property
@@ -89,19 +86,117 @@ class QualityCheckTool(BaseTool):
             "properties": {
                 "report": {
                     "type": "string",
-                    "description": "要检查的产出文本（Markdown）",
+                    "description": "要检查的产出文本",
+                },
+                "task_prompt": {
+                    "type": "string",
+                    "description": "原始任务描述（可选，帮助判断任务完成度）",
                 },
             },
             "required": ["report"],
         }
 
-    async def execute(self, report: str) -> str:
+    async def execute(self, report: str, task_prompt: str = "", **kwargs) -> str:
         try:
-            result = _check_report(report)
+            result = await self._evaluate(report, task_prompt)
             return json.dumps(result, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"quality_check failed: {e}")
-            return json.dumps({"pass": False, "error": str(e)}, ensure_ascii=False)
+            return json.dumps({
+                "pass": False,
+                "details": {"error": str(e)},
+                "fail_items": ["error"],
+                "fail_count": 1,
+            }, ensure_ascii=False)
+
+    async def _evaluate(self, report: str, task_prompt: str) -> dict:
+        """调用 LLM 执行评估，解析结构化结果。"""
+        # 短内容快速失败
+        if not report or len(report.strip()) < 50:
+            return {
+                "pass": False,
+                "details": {
+                    "task_completion": {"pass": False, "reason": "产出为空或极短"},
+                    "accuracy": {"pass": False, "reason": "产出为空或极短"},
+                    "structure": {"pass": False, "reason": "产出为空或极短"},
+                    "actionability": {"pass": False, "reason": "产出为空或极短"},
+                },
+                "fail_items": ["task_completion", "accuracy", "structure", "actionability"],
+                "fail_count": 4,
+            }
+
+        # 构建用户消息
+        user_msg = f"## 待评估的产出\n\n{report}"
+        if task_prompt:
+            user_msg = f"## 原始任务要求\n\n{task_prompt}\n\n{user_msg}"
+
+        # 调用 LLM
+        from langchain_core.messages import HumanMessage, SystemMessage
+        messages = [
+            SystemMessage(content=EVALUATION_PROMPT),
+            HumanMessage(content=user_msg),
+        ]
+        response = await self._llm_client.ainvoke(messages)
+        raw = response.content.strip()
+
+        # 解析 JSON（兼容 markdown code block 包裹）
+        parsed = self._parse_json(raw)
+        if parsed:
+            return self._normalize(parsed)
+
+        # 解析失败 → fallback
+        logger.warning(f"quality_check LLM response parse failed: {raw[:200]}")
+        return {
+            "pass": False,
+            "details": {"parse_error": {"pass": False, "reason": f"LLM 返回格式异常: {raw[:100]}"}},
+            "fail_items": ["parse_error"],
+            "fail_count": 1,
+        }
+
+    @staticmethod
+    def _parse_json(text: str) -> dict | None:
+        """从 LLM 回复中提取 JSON（兼容 ```json 包裹和直接 JSON）。"""
+        # 尝试直接解析
+        text = text.strip()
+        if text.startswith("{"):
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                pass
+
+        # 尝试提取 ```json ... ```
+        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        # 尝试找最外层的 { }
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+
+        return None
+
+    @staticmethod
+    def _normalize(parsed: dict) -> dict:
+        """确保输出格式与 quality_signal 兼容。"""
+        details = parsed.get("details", {})
+        fail_items = [
+            k for k, v in details.items()
+            if isinstance(v, dict) and not v.get("pass", False)
+        ]
+        return {
+            "pass": parsed.get("pass", len(fail_items) == 0),
+            "details": details,
+            "fail_items": fail_items,
+            "fail_count": len(fail_items),
+        }
 
 
 # ── QualitySignalTool ────────────────────────────────────────

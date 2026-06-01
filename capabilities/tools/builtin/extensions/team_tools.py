@@ -11,6 +11,7 @@ Team Tools - SubAgent 任务管理工具
 import asyncio
 import json
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from core.base_tool import BaseTool
 from core.utils import atomic_write, short_id, compute_excluded_tools
 
 _TASK_ID_RE = re.compile(r'^task_[a-f0-9]{8}$')
+_task_lock = threading.Lock()
 
 # Task status constants
 STATUS_PRODUCING = "producing"
@@ -41,10 +43,48 @@ VALID_TRANSITIONS = {
 }
 
 MUST_EXCLUDE_TOOLS = ("cron", "spawn", "check_status", "get_result")
+MAX_RESULT_CHARS = 5000
 
 
 def _now_ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _transition_task(workspace_root: Path, task_id: str, new_status: str, extra: dict = None) -> dict | None:
+    """线程安全的任务状态转换。返回更新后的 task dict，失败返回 None。"""
+    path = workspace_root / "team" / "tasks" / f"{task_id}.json"
+    if not path.exists():
+        logger.warning(f"Task {task_id} not found for transition")
+        return None
+
+    with _task_lock:
+        try:
+            task = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+
+        old_status = task["status"]
+        if new_status not in VALID_TRANSITIONS.get(old_status, []):
+            logger.warning(f"Invalid transition for {task_id}: {old_status} → {new_status}")
+            return None
+
+        task["status"] = new_status
+        task["updated_at"] = _now_ts()
+
+        if new_status in (STATUS_VERIFYING, STATUS_RUNNING):
+            task["attempts"] += 1
+
+        if new_status == STATUS_FAILED and task["attempts"] >= task["max_attempts"]:
+            task["status"] = STATUS_DONE
+            task["quality_warning"] = True
+            logger.warning(f"Task {task_id} reached max_attempts, force-done")
+
+        if extra:
+            task.update(extra)
+
+        atomic_write(path, json.dumps(task, ensure_ascii=False, indent=2))
+        logger.info(f"Task {task_id}: {old_status} → {task['status']}")
+        return task
 
 
 # ── TaskManageTool ──────────────────────────────────────────────
@@ -186,38 +226,14 @@ class TaskManageTool(BaseTool):
         if not _TASK_ID_RE.fullmatch(task_id):
             return "Error: 无效的 task_id 格式"
 
-        self._ensure_dirs()
-        path = self._tasks_dir / f"{task_id}.json"
-        if not path.exists():
-            return f"Error: 任务 {task_id} 不存在"
-
-        try:
-            task = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return f"Error: 任务 {task_id} 数据损坏"
-
         new_status = params.get("status")
         if not new_status:
             return "Error: update 需要 status"
 
-        old_status = task["status"]
+        task = _transition_task(self._workspace_root, task_id, new_status)
+        if task is None:
+            return f"Error: 无法将任务 {task_id} 转换到 '{new_status}'"
 
-        if new_status not in VALID_TRANSITIONS.get(old_status, []):
-            return f"Error: 不允许从 '{old_status}' 转换到 '{new_status}'"
-
-        task["status"] = new_status
-        task["updated_at"] = _now_ts()
-
-        if new_status in (STATUS_VERIFYING, STATUS_RUNNING):
-            task["attempts"] += 1
-
-        if new_status == STATUS_FAILED and task["attempts"] >= task["max_attempts"]:
-            task["status"] = STATUS_DONE
-            task["quality_warning"] = True
-            logger.warning(f"Task {task_id} reached max_attempts, force-done")
-
-        atomic_write(path, json.dumps(task, ensure_ascii=False, indent=2))
-        logger.info(f"Task {task_id}: {old_status} → {task['status']}")
         return json.dumps(task, ensure_ascii=False, indent=2)
 
     def _get(self, params: dict) -> str:
@@ -279,6 +295,10 @@ class SpawnTool(BaseTool):
                     "type": "string",
                     "description": "给 SubAgent 的指令（自包含）",
                 },
+                "retry_feedback": {
+                    "type": "string",
+                    "description": "上次验收反馈（重试时传入，让 SubAgent 知道上次哪里没过）",
+                },
             },
             "required": ["role", "prompt"],
         }
@@ -296,6 +316,7 @@ class SpawnTool(BaseTool):
         max_iterations: int = 50,
         max_questions: int = 3,
         max_attempts: int = 3,
+        max_concurrent: int = 5,
     ):
         self._llm_client = llm_client
         self._capability_registry = capability_registry
@@ -308,14 +329,16 @@ class SpawnTool(BaseTool):
         self._max_iterations = max_iterations
         self._max_questions = max_questions
         self._max_attempts = max_attempts
+        self._max_concurrent = max_concurrent
         self._background_tasks: dict[str, asyncio.Task] = {}
 
     async def execute(self, **kwargs) -> str:
-        if len(self._background_tasks) >= 5:
-            return json.dumps({"error": "已达到最大并发任务数（5）"}, ensure_ascii=False)
+        if len(self._background_tasks) >= self._max_concurrent:
+            return json.dumps({"error": f"已达到最大并发任务数（{self._max_concurrent}）"}, ensure_ascii=False)
 
         role_name = kwargs.get("role", "executor")
         prompt = kwargs.get("prompt", "")
+        retry_feedback = kwargs.get("retry_feedback", "")
 
         if role_name not in self._roles:
             return f"Error: 未知角色 '{role_name}'，可用: {list(self._roles.keys())}"
@@ -357,8 +380,8 @@ class SpawnTool(BaseTool):
         # 3. 构建 system prompt
         system_prompt = self._build_system_prompt(prompt_path)
 
-        # 4. 构建增强的 task prompt（包含元信息）
-        enhanced_prompt = self._build_task_prompt(prompt, task_id)
+        # 4. 构建增强的 task prompt（包含元信息和重试反馈）
+        enhanced_prompt = self._build_task_prompt(prompt, task_id, retry_feedback)
 
         # 5. 启动后台任务
         exclude_tools = self._compute_excluded_tools(role)
@@ -371,10 +394,14 @@ class SpawnTool(BaseTool):
         logger.info(f"Spawned {role_name} task {task_id}")
         return json.dumps({"task_id": task_id, "status": STATUS_PRODUCING}, ensure_ascii=False)
 
-    def _build_task_prompt(self, original_prompt: str, task_id: str) -> str:
-        return (
-            f"{original_prompt}\n\n"
-            f"---\n\n"
+    def _build_task_prompt(self, original_prompt: str, task_id: str, retry_feedback: str = "") -> str:
+        parts = [original_prompt]
+
+        if retry_feedback:
+            parts.append(f"\n## 上次验收反馈\n\n{retry_feedback}")
+
+        parts.append(
+            f"\n---\n\n"
             f"## 任务元信息\n\n"
             f"- task_id: `{task_id}`\n"
             f"- 遇到问题需要 Capricorn 决策时，用 `write_file` 写入 "
@@ -383,6 +410,7 @@ class SpawnTool(BaseTool):
             f"  格式：{{\"message\": \"具体问题描述\", \"can_continue\": false}}\n"
             f"- 最多问 **{self._max_questions}** 个问题，超过后任务会被标记为需要重新创建\n"
         )
+        return "".join(parts)
 
     def _build_system_prompt(self, prompt_path: str) -> str:
         from core.prompt_utils import (
@@ -415,6 +443,9 @@ class SpawnTool(BaseTool):
         task_id: str,
         exclude_tools: list,
     ):
+        # producing → running（经状态机校验，attempts 自增）
+        _transition_task(self._workspace_root, task_id, STATUS_RUNNING)
+
         try:
             from agent.agent import CapricornGraph
             from memory.session import SessionManager
@@ -448,28 +479,21 @@ class SpawnTool(BaseTool):
             questions_dir = self._workspace_root / "team" / "tasks" / task_id / "questions"
             question_count = len(list(questions_dir.glob("*.json"))) if questions_dir.exists() else 0
 
-            # 更新任务状态（producing → done / need_decision，一次原子写入）
-            task_json_path = self._workspace_root / "team" / "tasks" / f"{task_id}.json"
-            task_data = json.loads(task_json_path.read_text(encoding="utf-8"))
-            task_data["question_count"] = question_count
-            task_data["attempts"] = task_data.get("attempts", 0) + 1
-            task_data["status"] = STATUS_NEED_DECISION if question_count > 0 else STATUS_DONE
-            task_data["updated_at"] = _now_ts()
-            atomic_write(task_json_path, json.dumps(task_data, ensure_ascii=False, indent=2))
-
-            logger.info(f"Task {task_id} completed: {task_data['status']}")
+            # running → done / need_decision
+            final_status = STATUS_NEED_DECISION if question_count > 0 else STATUS_DONE
+            updated = _transition_task(self._workspace_root, task_id, final_status, {
+                "question_count": question_count,
+            })
+            if not updated:
+                logger.error(f"Failed to transition {task_id} to {final_status}")
 
         except Exception as e:
             logger.exception(f"Task {task_id} failed: {e}")
-            try:
-                task_json_path = self._workspace_root / "team" / "tasks" / f"{task_id}.json"
-                task_data = json.loads(task_json_path.read_text(encoding="utf-8"))
-                task_data["status"] = STATUS_ERROR
-                task_data["error"] = str(e)[:500]
-                task_data["updated_at"] = _now_ts()
-                atomic_write(task_json_path, json.dumps(task_data, ensure_ascii=False, indent=2))
-            except Exception:
-                logger.exception(f"Failed to update error status for {task_id}")
+            updated = _transition_task(self._workspace_root, task_id, STATUS_ERROR, {
+                "error": str(e)[:500],
+            })
+            if not updated:
+                logger.error(f"Failed to transition {task_id} to error state")
 
     def _compute_excluded_tools(self, role: dict) -> list:
         all_tools = [t.name for t in self._capability_registry.get_langchain_tools()]
@@ -577,6 +601,7 @@ class GetResultTool(BaseTool):
         return json.dumps({
             "task_id": task_id,
             "status": task["status"],
-            "result": result[:5000],
+            "result": result[:MAX_RESULT_CHARS],
+            "result_truncated": len(result) > MAX_RESULT_CHARS,
             "questions": questions,
         }, ensure_ascii=False, indent=2)

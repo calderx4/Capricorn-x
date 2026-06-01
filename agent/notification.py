@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List
 
+from core.paths import GATEWAY_DIR
+
 from loguru import logger
 
 from core.utils import atomic_write
@@ -24,7 +26,7 @@ class NotificationBus:
 
     def __init__(self):
         self._subscribers: List[asyncio.Queue] = []
-        self._path = Path(__file__).resolve().parent.parent / "gateway" / "notifications.jsonl"
+        self._path = GATEWAY_DIR / "notifications.jsonl"
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._file_lock = asyncio.Lock()
 

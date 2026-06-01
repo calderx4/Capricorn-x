@@ -1,8 +1,8 @@
 # Capricorn-x
 
-> v0.2.5 | 原生 Function Calling 驱动的轻量级通用 Agent Runtime
+> v0.2.6 | 原生 Function Calling 驱动的轻量级通用 Agent Runtime
 
-轻量级 Agent Runtime，支持 Cron 定时调度、Agent Teams 协作、垂直领域一键扩展。
+轻量级 Agent Runtime。不约束 LLM 怎么做，只告诉它有什么能用，让它自己规划和决策。
 
 ---
 
@@ -22,64 +22,74 @@ python run.py --mode gateway_with_webui
 
 ---
 
-## 使用案例
+## 设计理念
 
-### 1. 文件任务
+**Thin layer on top of LLM.** Capricorn 是 LLM 上层的调度层，不是框架。
 
-在 WebUI 中输入"帮我创建一个 Python 项目"，Agent 自动调用 read_file / write_file / exec 等工具完成项目搭建，包括目录结构、配置文件、主程序。
+| Capricorn 做 | LLM 做 |
+|-------------|--------|
+| 注册工具、提供能力 | 判断用什么工具、怎么组合 |
+| 管理 session / memory | 决定什么时候需要 spawn team |
+| 调度 cron | 决定任务拆分和执行策略 |
+| 维护 bia 行为规则 | 发现模式、自我纠偏 |
 
-### 2. 批量处理
-
-配置 Cron 定时任务（如每天早上 9 点），Agent 自动汇总项目状态，检查待办、生成报告，通过 SSE 实时推送结果。
-
-### 3. 质量检查
-
-通过 quality_check 工具按维度（正确性、规范性、可维护性等）检查代码质量，发现问题自动记录并可回滚。
+LLM 越强，Capricorn 越薄。不硬编码业务规则，不规定步骤数，不限制执行方式。
 
 ---
 
-## 架构设计
-
-### 整体架构
+## 架构
 
 ```
-用户
+用户（CLI / WebUI / HTTP API）
   │
   ▼
-Capricorn（主 Agent）
+Gateway（aiohttp, Auth, SSE）
   │
-  ├── FC 循环       — LLM → tool_calls → execute → repeat
-  ├── spawn()       — 派发子 Agent（executor 执行 / verifier 验收）
-  └── cron()        — 定时任务，支持角色化配置
+  ▼
+Capricorn Agent
+  │
+  ├── FC 循环      — LLM → tool_calls → execute → repeat
+  ├── 三层工具      — builtin / MCP / workflow，自动发现
+  ├── Agent Teams   — spawn executor / verifier，LLM 自己决定是否需要
+  ├── Cron          — 定时任务，支持角色配置
+  ├── 三层记忆      — session / MEMORY.md / HISTORY.md
+  └── BIA 自进化    — 行为规则去重、压缩、上限管理
 ```
 
-### 三层记忆
+### 工具系统
 
-| 记忆层 | 存储位置 | 用途 |
-|--------|----------|------|
-| 会话记忆 | JSONL 文件 | 单次对话上下文 |
-| 长期记忆 | MEMORY.md | Agent 需要始终记住的事实和偏好 |
-| 历史摘要 | HISTORY.md | 可搜索的行动历史记录 |
+工具通过 `BaseTool` 基类定义，按目录自动发现注册：
 
-### 角色化设计
+- **builtin** — 文件读写、命令执行、任务管理、质量检查等
+- **MCP** — 通过 MCP 协议接入外部服务（搜索、图像理解等）
+- **workflow** — 多步编排的复杂任务
 
-角色化将身份、权限、指令三层解耦：
+### Agent Teams
+
+主 Agent 可以 spawn 子 Agent（executor 执行任务，verifier 验收质量）。不硬编码何时 spawn，LLM 自行判断。重试时自动注入上次验收反馈。
+
+### 记忆管理
+
+| 层 | 存储 | 机制 |
+|----|------|------|
+| 会话记忆 | JSONL | FC 循环每轮写盘，防崩溃丢失 |
+| 长期记忆 | MEMORY.md | LLM 整合，有 token 上限（默认 3000） |
+| 历史摘要 | HISTORY.md | 可搜索的行动日志，有条目上限（默认 100） |
+| 行为规则 | bia.md | 时间戳 + 去重 + 1500 token 上限 + LLM 压缩 |
+
+### 角色化
+
+角色将身份（WHO）、权限（WHAT）、指令（HOW）三层解耦：
 
 | 层 | 决定 | 位置 |
 |----|------|------|
-| 身份（WHO）| 行为准则 | prompts/roles/executor.md |
-| 权限（WHAT）| 可用工具白名单 | roles/executor.yaml |
-| 指令（HOW）| 具体任务内容 | cron prompt / spawn brief |
+| 身份 | 行为准则 | `prompts/roles/executor.md` |
+| 权限 | 可用工具白名单 | `roles/executor.yaml` |
+| 指令 | 具体任务内容 | spawn brief / cron prompt |
 
-不同角色使用不同工具集合，executor 负责产出，verifier 负责验收，两者对抗协作提升质量。
+### Prompt 模板
 
-### 工具注册
-
-工具统一通过 BaseTool 基类注册，自动发现并加载：
-
-- **内置工具** — 文件读写、命令执行、任务管理等
-- **MCP 工具** — 通过 MCP 协议接入外部服务
-- **工作流** — 多步编排的复杂任务
+所有 prompt 都是 Markdown 模板，通过 `{{placeholder}}` 组装（workspace / tools / skills / memory / bia）。换垂类只需换 prompt 文件和工具配置。
 
 ---
 
@@ -87,12 +97,14 @@ Capricorn（主 Agent）
 
 | 能力 | 说明 |
 |------|------|
-| 原生 FC 循环 | LLM → tool_calls → execute，无 ReAct / 无状态机 |
-| 三层记忆 | 会话（JSONL）+ 长期（MEMORY.md）+ 历史（HISTORY.md）|
-| MCP 协议 | stdio / SSE 接入外部服务（搜索、图像理解等）|
-| 工具系统 | 文件、命令、任务、质量、变更日志等 |
-| 技能系统 | 按需加载领域专属技能 |
-| Gateway API | HTTP + SSE 实时推送，支持多会话 |
+| FC 循环 | LLM → tool_calls → execute，无 ReAct，无状态机 |
+| 三层工具 | builtin / MCP / workflow，自动发现注册 |
+| Agent Teams | spawn executor / verifier，LLM 自主决策 |
+| Cron | 定时调度，支持角色配置，SSE 推送结果 |
+| 三层记忆 | session + MEMORY.md + HISTORY.md，自动整合 |
+| BIA 自进化 | 行为规则管理（去重、压缩、上限） |
+| 技能系统 | autoload + on-demand，按需加载领域技能 |
+| Gateway API | HTTP + SSE + 多会话 + 认证 |
 
 ---
 
@@ -103,12 +115,20 @@ Capricorn（主 Agent）
 ```json
 {
   "llm": {
-    "model": "MiniMax-M2.7",
+    "model": "MiniMax-M3",
     "api_key": "${MINIMAX_API_KEY}",
     "api_base": "https://api.minimaxi.com/v1"
   },
   "workspace": { "sandbox": true },
-  "verticals": ["default"]
+  "team": {
+    "max_concurrent": 5,
+    "max_attempts": 3,
+    "max_questions": 3
+  },
+  "memory": {
+    "max_memory_tokens": 3000,
+    "max_history_entries": 100
+  }
 }
 ```
 

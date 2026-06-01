@@ -10,7 +10,9 @@ from datetime import datetime
 from pathlib import Path
 from threading import Lock
 
-_trace_file: Path = Path(__file__).resolve().parent.parent / "gateway" / "logs" / "trace.jsonl"
+from core.paths import GATEWAY_DIR
+
+_trace_file: Path = GATEWAY_DIR / "logs" / "trace.jsonl"
 _lock = Lock()
 
 _SENSITIVE_KEYS = frozenset({

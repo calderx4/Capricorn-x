@@ -17,6 +17,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
+from core.paths import GATEWAY_DIR
+
 from croniter import croniter
 from loguru import logger
 
@@ -120,12 +122,11 @@ class CronScheduler:
         self.cron_cfg = config.cron
         self.TICK_INTERVAL = self.cron_cfg.tick_interval
 
-        # 所有 gateway 路径基于项目根目录（从 workspace.root 绝对路径推导）
-        project_root = Path(config.workspace.root).parent
-        self.jobs_path = project_root / "gateway" / "jobs.json"
-        self.lock_path = project_root / "gateway" / ".tick.lock"
-        self.output_dir = project_root / "gateway" / "output"
-        self.workspaces_dir = project_root / "gateway" / "workspaces"
+        # 所有 gateway 路径基于项目根目录
+        self.jobs_path = GATEWAY_DIR / "jobs.json"
+        self.lock_path = GATEWAY_DIR / ".tick.lock"
+        self.output_dir = GATEWAY_DIR / "output"
+        self.workspaces_dir = GATEWAY_DIR / "workspaces"
 
         self._lock_fd = None
         self._initialized = False

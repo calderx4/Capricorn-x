@@ -17,14 +17,26 @@ def build_prompt(template_path: str, **sections: str) -> str:
     if not p.exists():
         raise FileNotFoundError(f"Prompt template not found: {template_path}")
     template = p.read_text("utf-8")
+    # 先转义用户内容中的 {{ }}，防止被当作模板变量
+    placeholders = set(sections.keys())
+    safe_sections = {}
     for name, content in sections.items():
+        if name in ("workspace_section", "memory_section", "agent_md_section",
+                     "tools_section", "skills_section", "task_prompt"):
+            content = content.replace("{{", "<<").replace("}}", ">>")
+        safe_sections[name] = content
+    for name, content in safe_sections.items():
         template = template.replace("{{" + name + "}}", content)
     while "\n\n\n" in template:
         template = template.replace("\n\n\n", "\n\n")
     result = template.strip()
+    # 检查 unreplaced（此时用户内容还是 << >> 形式，不会误报）
     unreplaced = re.findall(r'\{\{(\w+)\}\}', result)
     if unreplaced:
         logger.warning(f"build_prompt: unreplaced placeholders: {unreplaced}")
+    # 还原转义
+    result = result.replace("<<", "{{").replace(">>", "}}")
+    return result
     return result
 
 

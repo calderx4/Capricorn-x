@@ -69,6 +69,7 @@ class MemoryConsolidationWorkflow(BaseWorkflow):
             self.MAX_TOKENS_BEFORE_CONSOLIDATION = config.get(
                 "max_tokens", self.MAX_TOKENS_BEFORE_CONSOLIDATION
             )
+            self.max_memory_tokens = config.get("max_memory_tokens", 0)
 
     def get_messages_to_consolidate(self, session_data: Dict) -> List[Dict]:
         messages = session_data.get("messages", [])
@@ -110,6 +111,7 @@ class MemoryConsolidationWorkflow(BaseWorkflow):
         prompt = build_consolidation_prompt(
             current_memory,
             self._format_messages(messages_to_consolidate),
+            max_memory_tokens=self.max_memory_tokens,
         )
 
         max_retries = 2

@@ -16,19 +16,38 @@ from config.settings import WorkspaceConfig
 class HistoryLog:
     """历史日志管理"""
 
-    def __init__(self, workspace: WorkspaceConfig):
+    def __init__(self, workspace: WorkspaceConfig, max_entries: int = 100):
         self.file_path = workspace.get_memory_path("HISTORY.md")
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
+        self._max_entries = max_entries
         logger.debug(f"History log path: {self.file_path}")
 
     def append(self, entry: str) -> None:
         try:
             with open(self.file_path, "a", encoding="utf-8") as f:
                 f.write(entry + "\n")
+            self._prune_if_needed()
             logger.debug(f"Appended to history log: {entry[:50]}...")
         except Exception as e:
             logger.error(f"Failed to append to history log: {e}")
             raise
+
+    def _prune_if_needed(self) -> None:
+        if self._max_entries <= 0 or not self.file_path.exists():
+            return
+        try:
+            lines = self.file_path.read_text(encoding="utf-8").split("\n")
+            entry_indices = [i for i, l in enumerate(lines) if l.strip().startswith("[2")]
+            if len(entry_indices) <= self._max_entries:
+                return
+            cut = entry_indices[-self._max_entries]
+            from core.utils import atomic_write
+            atomic_write(self.file_path, "\n".join(lines[cut:]).lstrip("\n"))
+            logger.info(
+                f"History pruned: removed {len(entry_indices) - self._max_entries} oldest entries"
+            )
+        except Exception as e:
+            logger.error(f"History prune failed: {e}")
 
     def search(self, query: str, case_sensitive: bool = False) -> List[str]:
         if not self.file_path.exists():

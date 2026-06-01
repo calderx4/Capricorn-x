@@ -9,6 +9,7 @@ from pathlib import Path
 from loguru import logger
 
 from core import trace
+from core.paths import MEMORY_CONSOLIDATION_DIR
 from core.utils import load_class_from_file
 
 
@@ -60,7 +61,7 @@ async def consolidate_if_needed(
     prefix = f"[{context_label}] " if context_label else ""
     logger.info(f"{prefix}Consolidation triggered by {triggered_by}")
 
-    mc_path = active_dir / "workflows" / "memory_consolidation" / "__init__.py"
+    mc_path = MEMORY_CONSOLIDATION_DIR / "__init__.py"
     if not mc_path.exists():
         logger.warning(f"Memory consolidation workflow not found: {mc_path}")
         return False
@@ -74,8 +75,7 @@ async def consolidate_if_needed(
         config={
             "max_messages": mem_config.message_threshold,
             "messages_to_keep": mem_config.messages_to_keep,
-            "max_tokens": mem_config.token_threshold,
-            "context_budget": mem_config.context_budget,
+            "max_memory_tokens": mem_config.max_memory_tokens,
         }
     )
 

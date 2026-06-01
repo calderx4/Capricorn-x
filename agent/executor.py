@@ -20,6 +20,10 @@ from memory.session import SessionManager
 from memory.long_term import LongTermMemory
 from memory.history import HistoryLog
 from core import trace
+from core.paths import (
+    PROMPTS_DIR, ROLES_DIR, BUILTIN_EXTENSIONS,
+    WORKFLOW_EXTENSIONS, CONFIG_DIR,
+)
 from core.consolidation import consolidate_if_needed
 
 # 防止 LangChain OpenAI patch 被重复应用
@@ -115,24 +119,32 @@ class CapricornAgent:
         )
 
         # 4. 加载角色系统
-        project_root = str(Path(self.config_path).parent) if self.config_path else "."
-        self._load_roles(project_root)
-        self._bia_path = str(Path(project_root) / "config" / "prompts" / "bia.md")
-        self._active_dir = Path(project_root) / "capabilities" / "tools" / "workflow" / "extensions"
-        self._cron_prompt_path = str(Path(project_root) / "config" / "prompts" / "cron.md")
+        self._load_roles()
+        self._bia_path = str(Path(self.config.workspace.root) / "memory" / "bia.md")
+        self._active_dir = WORKFLOW_EXTENSIONS
+        self._cron_prompt_path = str(PROMPTS_DIR / "cron.md")
+        self._team_config = self.config.team.model_dump()
 
         # 5. 注册 BIA 工具（手动，需要 bia_path）
         from core.utils import load_class_from_file
-        bia_tool_path = Path(project_root) / "capabilities" / "tools" / "builtin" / "extensions" / "bia_tools.py"
+        bia_tool_path = BUILTIN_EXTENSIONS / "bia_tools.py"
         if bia_tool_path.exists():
             BiaUpdateTool = load_class_from_file(bia_tool_path, "BiaUpdateTool")
-            bia_tool = BiaUpdateTool(bia_path=self._bia_path)
+            bia_tool = BiaUpdateTool(bia_path=self._bia_path, llm_client=self.llm_client)
             self.capability_registry.tools.register(bia_tool, layer="builtin")
             logger.info("BIA tool registered")
 
+        # 5b. 注册 Quality 工具（手动，需要 llm_client）
+        quality_tool_path = BUILTIN_EXTENSIONS / "quality_tools.py"
+        if quality_tool_path.exists():
+            QualityCheckTool = load_class_from_file(quality_tool_path, "QualityCheckTool")
+            quality_tool = QualityCheckTool(llm_client=self.llm_client)
+            self.capability_registry.tools.register(quality_tool, layer="builtin")
+            logger.info("Quality check tool registered (LLM-based)")
+
         # 6. 注册 Team 工具（如果定义了 roles）
         if self._roles:
-            team_tool_path = Path(project_root) / "capabilities" / "tools" / "builtin" / "extensions" / "team_tools.py"
+            team_tool_path = BUILTIN_EXTENSIONS / "team_tools.py"
             if team_tool_path.exists():
                 from core.utils import load_module_from_file
                 _team_mod = load_module_from_file(team_tool_path)
@@ -143,7 +155,6 @@ class CapricornAgent:
                 )
                 self.capability_registry.tools.register(task_tool, layer="builtin")
 
-                executor_cfg = self._team_config.get("executor", {})
                 spawn_tool = _team_mod.SpawnTool(
                     llm_client=self.llm_client,
                     capability_registry=self.capability_registry,
@@ -154,8 +165,9 @@ class CapricornAgent:
                     workspace_root=self.config.workspace.root,
                     sandbox=self.config.workspace.sandbox,
                     max_iterations=self.config.agent.get("max_iterations", 50),
-                    max_questions=executor_cfg.get("max_questions", 3),
-                    max_attempts=executor_cfg.get("max_attempts", 3),
+                    max_questions=self.config.team.max_questions,
+                    max_attempts=self.config.team.max_attempts,
+                    max_concurrent=self.config.team.max_concurrent,
                 )
                 self.capability_registry.tools.register(spawn_tool, layer="builtin")
 
@@ -171,6 +183,17 @@ class CapricornAgent:
 
                 logger.info(f"Team tools registered (roles: {list(self._roles.keys())})")
 
+                # 校验角色白名单工具是否都已注册
+                registered = {t.name for t in self.capability_registry.get_langchain_tools()}
+                for role_name, role_def in self._roles.items():
+                    role_tools = role_def.get("tools")
+                    if role_tools and role_tools != "all":
+                        missing = set(role_tools) - registered
+                        if missing:
+                            logger.warning(
+                                f"Role '{role_name}' whitelist has unregistered tools: {missing}"
+                            )
+
         # 7. 初始化会话管理器
         self.session_manager = SessionManager(self.config.workspace)
 
@@ -178,7 +201,7 @@ class CapricornAgent:
         self.long_term_memory = LongTermMemory(self.config.workspace)
 
         # 9. 初始化历史日志
-        self.history_log = HistoryLog(self.config.workspace)
+        self.history_log = HistoryLog(self.config.workspace, max_entries=self.config.memory.max_history_entries)
 
         # 10. 初始化 Cron 调度器
         if self.config.cron.enabled:
@@ -202,7 +225,7 @@ class CapricornAgent:
             self.capability_registry.tools.register(cron_tool, layer="builtin")
 
         # 11. 构建图
-        system_prompt_path = str(Path(__file__).parent.parent / "config" / "prompts" / "system.md")
+        system_prompt_path = str(PROMPTS_DIR / "system.md")
         self._system_prompt_path = system_prompt_path
 
         self.graph = CapricornGraph(
@@ -219,10 +242,10 @@ class CapricornAgent:
 
         logger.info("✓ Capricorn Agent initialized")
 
-    def _load_roles(self, project_root: str):
+    def _load_roles(self):
         """扫描 config/roles/ 目录，加载角色定义"""
         import yaml
-        roles_dir = Path(project_root) / "config" / "roles"
+        roles_dir = ROLES_DIR
         if not roles_dir.exists():
             return
 

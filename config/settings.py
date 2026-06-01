@@ -81,6 +81,8 @@ class MemoryConfig(BaseModel):
     messages_to_keep: int = Field(default=10, gt=0)
     token_threshold: int = Field(default=8000, gt=0)
     context_budget: int = Field(default=16000, gt=0)
+    max_memory_tokens: int = Field(default=3000, gt=0)
+    max_history_entries: int = Field(default=100, gt=0)
 
 
 class CronConfig(BaseModel):
@@ -89,6 +91,14 @@ class CronConfig(BaseModel):
     enabled: bool = False
     tick_interval: int = Field(default=60, gt=0)
     fresh_session: bool = False
+
+
+class TeamConfig(BaseModel):
+    """Team 多Agent配置"""
+
+    max_concurrent: int = Field(default=5, gt=0)
+    max_attempts: int = Field(default=3, gt=0)
+    max_questions: int = Field(default=3, gt=0)
 
 
 class GatewayConfig(BaseModel):
@@ -110,6 +120,7 @@ class Config(BaseModel):
     agent: Dict[str, Any] = Field(default_factory=dict)
     blocked_commands: list[str] = Field(default_factory=list)
     cron: CronConfig = Field(default_factory=CronConfig)
+    team: TeamConfig = Field(default_factory=TeamConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
 
     @classmethod
