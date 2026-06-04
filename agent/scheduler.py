@@ -408,7 +408,7 @@ class CronScheduler:
 
         workspace = WorkspaceConfig(root=str(workdir), sandbox=True)
         session_manager = SessionManager(workspace)
-        history_log = HistoryLog(workspace)
+        history_log = HistoryLog(workspace, max_entries=self.config.memory.max_history_entries)
 
         # cron 使用自己的 long_term_memory（写入 gateway/workspaces/{name}/memory/）
         fresh = job.get("fresh_session", False)

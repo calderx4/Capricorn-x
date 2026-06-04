@@ -1,16 +1,11 @@
 """
 Memory Consolidation Workflow
 
-并不由llm调用，而是被动触发。
+被动触发，由 core/consolidation.py 调用。
 
-自动化记忆整合流程，基于双重触发机制：
-1. 消息数触发：未整合消息 ≥ 30 条
-2. Token 数触发：未整合 tokens ≥ 8000
-3. 上下文预算检查：总上下文 ≥ 16000 tokens
+职责：接收待整合消息，调用 LLM 提取关键信息写入 MEMORY.md 和 HISTORY.md。
 
-整合方式：
-- LLM 调用 save_memory 工具
-- 结果通过 LongTermMemory 和 HistoryLog 封装类写入
+触发和切割逻辑由 consolidation.py 负责，本模块只做 LLM 总结。
 """
 
 import json
@@ -20,14 +15,13 @@ from typing import Any, Dict, List
 from loguru import logger
 
 from core.base_workflow import BaseWorkflow
-from core.token_counter import TokenCounter
 from memory.long_term import LongTermMemory
 from memory.history import HistoryLog
 from capabilities.tools.workflow.extensions.memory_consolidation.prompts import SAVE_MEMORY_TOOL, build_consolidation_prompt
 
 
 class MemoryConsolidationWorkflow(BaseWorkflow):
-    """记忆整合 Workflow"""
+    """记忆整合 Workflow — 只负责 LLM 总结"""
 
     auto_discover = False  # 依赖复杂，不走自动发现
 
@@ -43,14 +37,6 @@ class MemoryConsolidationWorkflow(BaseWorkflow):
     def required_tools(self) -> List[str]:
         return []
 
-    # ========== 配置 ==========
-    MAX_MESSAGES_BEFORE_CONSOLIDATION = 30
-    MESSAGES_TO_KEEP = 15
-    MIN_MESSAGES_TO_KEEP = 5  # Token 路径的硬下限，防止过度裁剪
-
-    MAX_TOKENS_BEFORE_CONSOLIDATION = 8000
-    TOKENS_TO_CONSOLIDATION_RATIO = 0.5
-
     def __init__(self, long_term_memory: LongTermMemory, history_log: HistoryLog,
                  llm_client, config: Dict = None):
         self.long_term_memory = long_term_memory
@@ -58,51 +44,12 @@ class MemoryConsolidationWorkflow(BaseWorkflow):
         self.llm = llm_client
         self._consecutive_failures = 0
         self._max_failures = 3
-
-        if config:
-            self.MAX_MESSAGES_BEFORE_CONSOLIDATION = config.get(
-                "max_messages", self.MAX_MESSAGES_BEFORE_CONSOLIDATION
-            )
-            self.MESSAGES_TO_KEEP = config.get(
-                "messages_to_keep", self.MESSAGES_TO_KEEP
-            )
-            self.MAX_TOKENS_BEFORE_CONSOLIDATION = config.get(
-                "max_tokens", self.MAX_TOKENS_BEFORE_CONSOLIDATION
-            )
-            self.max_memory_tokens = config.get("max_memory_tokens", 0)
-
-    def get_messages_to_consolidate(self, session_data: Dict) -> List[Dict]:
-        messages = session_data.get("messages", [])
-        n = len(messages)
-
-        if n <= self.MIN_MESSAGES_TO_KEEP:
-            return []
-
-        # 路径 1：条数触发 → 保留最后 MESSAGES_TO_KEEP 条
-        if n >= self.MAX_MESSAGES_BEFORE_CONSOLIDATION:
-            return messages[:-self.MESSAGES_TO_KEEP]
-
-        # 路径 2：Token 触发 → 按 token 预算从尾部裁剪，不固定保留条数
-        token_count = TokenCounter.count_messages_tokens(messages)
-        if token_count >= self.MAX_TOKENS_BEFORE_CONSOLIDATION:
-            target_tokens = int(token_count * (1 - self.TOKENS_TO_CONSOLIDATION_RATIO))
-            # 从尾部累加：保留最新消息直到 tokens 达到 target
-            accumulated = 0
-            keep_from = n
-            for i in range(n - 1, -1, -1):
-                accumulated += TokenCounter.count_messages_tokens([messages[i]])
-                if accumulated >= target_tokens:
-                    keep_from = i
-                    break
-            # 硬下限：至少保留 MIN_MESSAGES_TO_KEEP 条
-            keep_from = min(keep_from, n - self.MIN_MESSAGES_TO_KEEP)
-            return messages[:keep_from]
-
-        return messages[:-self.MESSAGES_TO_KEEP]
+        self.max_memory_tokens = (config or {}).get("max_memory_tokens", 0)
 
     async def execute(self, tools: Any = None, **kwargs) -> Any:
+        """执行 LLM 总结。期望 session_data 中包含 messages_to_consolidate。"""
         session_data = kwargs.get("session_data", {})
-        messages_to_consolidate = self.get_messages_to_consolidate(session_data)
+        messages_to_consolidate = session_data.get("messages_to_consolidate", [])
 
         if not messages_to_consolidate:
             return True
@@ -125,15 +72,19 @@ class MemoryConsolidationWorkflow(BaseWorkflow):
                 ])
 
                 if not hasattr(response, "tool_calls") or not response.tool_calls:
+                    logger.debug(f"Consolidation: no tool_calls (attempt {attempt + 1}), response: {getattr(response, 'content', '')[:200]}")
                     if attempt < max_retries - 1:
                         continue
+                    logger.warning("Consolidation: all retries exhausted — LLM never returned tool_calls")
                     return self._fail_or_raw_archive(messages_to_consolidate)
 
                 tool_call = response.tool_calls[0]
 
                 if tool_call.get("name") != "save_memory":
+                    logger.debug(f"Consolidation: wrong tool name '{tool_call.get('name')}' (attempt {attempt + 1})")
                     if attempt < max_retries - 1:
                         continue
+                    logger.warning(f"Consolidation: all retries exhausted — LLM returned tool '{tool_call.get('name')}' instead of 'save_memory'")
                     return self._fail_or_raw_archive(messages_to_consolidate)
 
                 args = tool_call.get("args", {})
@@ -144,8 +95,10 @@ class MemoryConsolidationWorkflow(BaseWorkflow):
                 memory_update = args.get("memory_update", "")
 
                 if not history_entry or not memory_update:
+                    logger.debug(f"Consolidation: missing args (attempt {attempt + 1}), keys={list(args.keys())}")
                     if attempt < max_retries - 1:
                         continue
+                    logger.warning("Consolidation: all retries exhausted — save_memory args missing history_entry or memory_update")
                     return self._fail_or_raw_archive(messages_to_consolidate)
 
                 self.history_log.append(history_entry)
@@ -155,7 +108,8 @@ class MemoryConsolidationWorkflow(BaseWorkflow):
                 self._consecutive_failures = 0
                 return True
 
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Consolidation LLM error (attempt {attempt + 1}): {type(e).__name__}: {e}")
                 if attempt < max_retries - 1:
                     continue
                 return self._fail_or_raw_archive(messages_to_consolidate)

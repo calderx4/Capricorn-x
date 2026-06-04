@@ -1,6 +1,6 @@
 # Capricorn-x
 
-> v0.2.7 | 原生 Function Calling 驱动的轻量级通用 Agent Runtime
+> v0.2.8 | 原生 Function Calling 驱动的轻量级通用 Agent Runtime
 
 轻量级 Agent Runtime。不约束 LLM 怎么做，只告诉它有什么能用，让它自己规划和决策。
 
@@ -12,7 +12,7 @@
 git clone https://github.com/calderx4/Capricorn-x.git
 cd Capricorn-x
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -r requirements.txt
 cp .env.example .env
 # 编辑 .env 填入 API Key
 

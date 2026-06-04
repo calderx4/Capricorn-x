@@ -80,9 +80,9 @@ class MemoryConfig(BaseModel):
     message_threshold: int = Field(default=20, gt=0)
     messages_to_keep: int = Field(default=10, gt=0)
     token_threshold: int = Field(default=8000, gt=0)
-    context_budget: int = Field(default=16000, gt=0)
     max_memory_tokens: int = Field(default=3000, gt=0)
     max_history_entries: int = Field(default=100, gt=0)
+    consolidation_ratio: float = Field(default=0.5, gt=0, lt=1.0)
 
 
 class CronConfig(BaseModel):
