@@ -31,6 +31,7 @@ from aiohttp import web
 from loguru import logger
 
 from core.utils import atomic_write
+from agent.events import QueueEventSink
 
 MAX_PROMPT_LENGTH = 50000
 MAX_CONCURRENT_TASKS = 20
@@ -38,6 +39,14 @@ MAX_TASK_TIMEOUT = 3600  # 单个异步任务最长 1 小时
 MAX_SSE_CLIENTS = 50
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 单文件上传上限 50MB
 TASK_ID_RE = re.compile(r'^[0-9a-f]{8}$')
+
+
+async def _sse_write(resp: web.StreamResponse, data: bytes):
+    """写入 SSE 数据，兼容 sync/async 版本的 StreamResponse.write()"""
+    result = resp.write(data)
+    if asyncio.iscoroutine(result):
+        await result
+    await resp.drain()
 THREAD_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 
 
@@ -78,6 +87,7 @@ class Gateway:
         app = web.Application(middlewares=middlewares, client_max_size=30 * 1024 * 1024)
         app.add_routes([
             web.post("/chat", self._handle_chat),
+            web.post("/chat/stream", self._handle_chat_stream),
             web.post("/upload", self._handle_upload),
             web.post("/task", self._handle_task_create),
             web.get("/task/{task_id}", self._handle_task_status),
@@ -183,6 +193,115 @@ class Gateway:
         except Exception as e:
             logger.error(f"/chat error: {e}")
             return web.json_response({"error": "Internal server error"}, status=500)
+
+    async def _handle_chat_stream(self, request: web.Request) -> web.StreamResponse:
+        """POST /chat/stream — SSE 流式返回 FC 循环执行步骤"""
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        prompt, err = self._validate_prompt(body)
+        if err:
+            return err
+
+        thread_id = body.get("thread_id", "default")
+        if not THREAD_ID_RE.fullmatch(thread_id):
+            return web.json_response({"error": "Invalid thread_id"}, status=400)
+
+        images = body.get("images", [])
+        attachments = body.get("attachments", [])
+
+        # 类型校验（与 /chat 一致）
+        if not isinstance(images, list) or not isinstance(attachments, list):
+            return web.json_response({"error": "images and attachments must be arrays"}, status=400)
+        for img in images:
+            if not isinstance(img, dict) or "base64" not in img:
+                return web.json_response({"error": "Each image must be a dict with 'base64' key"}, status=400)
+        if len(images) > 10:
+            return web.json_response({"error": "Too many images (max 10)"}, status=400)
+        total_image_size = sum(len(img.get("base64", "")) * 3 // 4 for img in images)
+        if total_image_size > 20 * 1024 * 1024:
+            return web.json_response({"error": "Images too large (max 20MB total)"}, status=400)
+
+        # 初始化 SSE 响应
+        resp = web.StreamResponse()
+        resp.content_type = "text/event-stream; charset=utf-8"
+        resp.headers["Cache-Control"] = "no-cache"
+        resp.headers["Connection"] = "keep-alive"
+        await resp.prepare(request)
+
+        sink = QueueEventSink(maxsize=200)
+        agent_task = None
+
+        async def _run_agent():
+            try:
+                lock = self._get_thread_lock(thread_id)
+                async with lock:
+                    await self.agent.chat(
+                        prompt, thread_id=thread_id,
+                        images=images, attachments=attachments,
+                        on_event=sink.emit,
+                    )
+            except asyncio.CancelledError:
+                logger.debug("SSE /chat/stream agent task cancelled")
+                await sink.emit("error", {"error": "Request cancelled"})
+            except Exception as e:
+                logger.error(f"SSE /chat/stream agent error: {e}")
+                await sink.emit("error", {"error": "Internal server error"})
+            finally:
+                sink.mark_done()
+
+        try:
+            # 启动 agent task
+            agent_task = asyncio.create_task(_run_agent())
+
+            # 流式读取事件
+            while True:
+                try:
+                    event = await asyncio.wait_for(sink.queue.get(), timeout=30)
+                    event_type = event.get("type", "unknown")
+                    data = json.dumps(event.get("data", {}), ensure_ascii=False)
+                    await _sse_write(resp, f"event: {event_type}\ndata: {data}\n\n".encode("utf-8"))
+                    # 终止事件：收到 run_end 或 error 后，再排空队列然后退出
+                    if event_type in ("run_end", "error"):
+                        # 排空队列中剩余事件
+                        while not sink.queue.empty():
+                            remaining = sink.queue.get_nowait()
+                            rt = remaining.get("type", "unknown")
+                            rd = json.dumps(remaining.get("data", {}), ensure_ascii=False)
+                            await _sse_write(resp, f"event: {rt}\ndata: {rd}\n\n".encode("utf-8"))
+                        break
+                except asyncio.TimeoutError:
+                    if sink._done.is_set():
+                        break
+                    # keepalive
+                    await _sse_write(resp, b":keepalive\n\n")
+
+            # 发送完成信号
+            await _sse_write(resp, b"event: done\ndata: {}\n\n")
+
+        except (ConnectionResetError, ConnectionError):
+            logger.debug("SSE /chat/stream client disconnected")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"SSE /chat/stream error: {e}")
+            try:
+                error_data = json.dumps({"error": "Internal server error"}, ensure_ascii=False)
+                await _sse_write(resp, f"event: error\ndata: {error_data}\n\n".encode("utf-8"))
+            except Exception:
+                pass
+        finally:
+            if agent_task and not agent_task.done():
+                agent_task.cancel()
+            if agent_task:
+                try:
+                    await agent_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+        return resp
 
     async def _handle_upload(self, request: web.Request) -> web.Response:
         """POST /upload — 上传文件到 workspace"""
@@ -312,7 +431,7 @@ class Gateway:
             return web.json_response({"error": "Too many SSE connections"}, status=429)
 
         resp = web.StreamResponse()
-        resp.content_type = "text/event-stream"
+        resp.content_type = "text/event-stream; charset=utf-8"
         resp.headers["Cache-Control"] = "no-cache"
         resp.headers["Connection"] = "keep-alive"
         await resp.prepare(request)
@@ -323,11 +442,9 @@ class Gateway:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30)
                     data = json.dumps(event, ensure_ascii=False)
-                    resp.write(f"data: {data}\n\n".encode("utf-8"))
-                    await resp.drain()
+                    await _sse_write(resp, f"data: {data}\n\n".encode("utf-8"))
                 except asyncio.TimeoutError:
-                    resp.write(b":keepalive\n\n")
-                    await resp.drain()
+                    await _sse_write(resp, b":keepalive\n\n")
         except (ConnectionResetError, ConnectionError, asyncio.CancelledError):
             pass
         except Exception as e:

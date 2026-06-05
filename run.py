@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from agent.executor import CapricornAgent
+from agent.events import PrintEventSink
 from agent.gateway import Gateway
 from agent.notification import NotificationBus
 from config.settings import Config
@@ -66,6 +67,7 @@ class CapricornCLI:
 
     async def _run_interactive(self):
         """CLI 交互模式"""
+        sink = PrintEventSink()
         print("💡 输入 'exit' 或 'quit' 退出，'help' 查看帮助\n")
         while True:
             try:
@@ -85,7 +87,7 @@ class CapricornCLI:
                     os.system('clear' if os.name == 'posix' else 'cls')
                     continue
 
-                response = await self.agent.chat(user_input)
+                response = await self.agent.chat(user_input, on_event=sink.emit)
                 print(f"\n🤖 Assistant: {response}\n")
 
             except KeyboardInterrupt:

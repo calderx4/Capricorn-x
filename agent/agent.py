@@ -28,6 +28,7 @@ from core.prompt_utils import (
     build_tools_section, build_skills_section, build_memory_section,
     build_bia_section, build_prompt,
 )
+from agent.events import EventCallback, safe_emit, current_on_event
 
 
 class CapricornGraph:
@@ -69,9 +70,14 @@ class CapricornGraph:
             self._llm_with_tools = None
             logger.warning("LLM client not initialized")
 
+    async def _emit(self, on_event: EventCallback, event_type: str, data: dict):
+        """安全发出事件（委托给 safe_emit）"""
+        await safe_emit(on_event, event_type, data)
+
     async def run(self, user_input: str, thread_id: str = "default",
                   notifications: str = "", images: list = None,
-                  attachments: list = None) -> str:
+                  attachments: list = None,
+                  on_event: EventCallback = None) -> str:
         """运行 FC 循环"""
         logger.info(f"Running agent with thread_id: {thread_id}")
 
@@ -133,6 +139,11 @@ class CapricornGraph:
         if not self._llm_with_tools:
             return "LLM 客户端未初始化"
 
+        await self._emit(on_event, "run_start", {
+            "thread_id": thread_id,
+            "max_iterations": self.max_iterations,
+        })
+
         tools_used = []
         i = -1
 
@@ -142,16 +153,26 @@ class CapricornGraph:
                 logger.info(f"Thinking... (iteration {i + 1})")
                 trace.round_start(i + 1, len(messages))
 
+                await self._emit(on_event, "round_start", {"round": i + 1})
+                await self._emit(on_event, "thinking", {"round": i + 1})
+
                 try:
-                    response = await self._llm_with_tools.ainvoke(messages)
-                except Exception as invoke_err:
-                    err_str = str(invoke_err)
-                    if "429" in err_str or "rate" in err_str.lower():
-                        logger.warning(f"Rate limited, retrying in 3s...")
-                        await asyncio.sleep(3)
-                        response = await self._llm_with_tools.ainvoke(messages)
+                    for retry in range(3):
+                        try:
+                            response = await self._llm_with_tools.ainvoke(messages)
+                            break
+                        except Exception as invoke_err:
+                            err_str = str(invoke_err)
+                            if "429" in err_str or "rate" in err_str.lower():
+                                wait = 3 * (2 ** retry)  # 3s, 6s, 12s
+                                logger.warning(f"Rate limited, retrying in {wait}s... (attempt {retry + 1}/3)")
+                                await asyncio.sleep(wait)
+                            else:
+                                raise
                     else:
-                        raise
+                        raise RuntimeError("Max retries exceeded for rate limit")
+                except RuntimeError:
+                    raise
                 messages.append(response)
 
                 response_content = self._extract_content(response)
@@ -181,8 +202,10 @@ class CapricornGraph:
                                     tool_calls=ai_tool_calls,
                                     reasoning_content=rc)
 
-                # 并发执行工具（带 trace）
-                tool_messages = await self._execute_tools(response.tool_calls, round=i + 1)
+                # 并发执行工具（带 trace + 事件）
+                tool_messages = await self._execute_tools(
+                    response.tool_calls, round=i + 1, on_event=on_event,
+                )
                 messages.extend(tool_messages)
                 tools_used.extend(tool_names)
 
@@ -195,6 +218,11 @@ class CapricornGraph:
 
                 round_latency = int((time.monotonic() - round_start_ts) * 1000)
                 trace.round_end(i + 1, len(tool_names), round_latency)
+                await self._emit(on_event, "round_end", {
+                    "round": i + 1,
+                    "tool_count": len(tool_names),
+                    "latency_ms": round_latency,
+                })
 
                 for tm in tool_messages:
                     logger.debug(f"[Trace] 工具返回 (id={tm.tool_call_id}): {tm.content}")
@@ -215,37 +243,89 @@ class CapricornGraph:
             session.add_message("assistant", final_response, tools_used=tools_used,
                                 reasoning_content=final_rc)
             self.session_manager.save_session(session)
+
+            await self._emit(on_event, "response", {"content": final_response})
+            await self._emit(on_event, "run_end", {
+                "thread_id": thread_id,
+                "total_rounds": i + 1,
+                "tools_used": tools_used,
+            })
+
             return final_response
 
         except Exception as e:
             logger.error(f"Agent execution failed: {e}")
-            session.add_message("assistant", "执行失败，请稍后重试")
+            error_msg = "执行失败，请稍后重试"
+            session.add_message("assistant", error_msg)
             self.session_manager.save_session(session)
-            return "执行失败，请稍后重试"
+            # 即使异常也发出终止事件，确保 SSE 客户端不挂起
+            await self._emit(on_event, "response", {"content": error_msg})
+            await self._emit(on_event, "run_end", {
+                "thread_id": thread_id,
+                "total_rounds": max(i + 1, 0),
+                "tools_used": tools_used,
+            })
+            return error_msg
 
-    async def _execute_tools(self, tool_calls, round: int = 0) -> list:
+    def _summarize_tool_args(self, args: dict, max_len: int = 200) -> str:
+        """生成工具参数摘要（截断 + 单行化）"""
+        if not args:
+            return ""
+        parts = []
+        for k, v in args.items():
+            s = str(v).replace('\n', '\\n').replace('\r', '')
+            if len(s) > 60:
+                s = s[:57] + "..."
+            parts.append(f"{k}='{s}'" if isinstance(v, str) else f"{k}={s}")
+        result = ", ".join(parts)
+        return result[:max_len] + "..." if len(result) > max_len else result
+
+    async def _execute_tools(self, tool_calls, round: int = 0,
+                             on_event: EventCallback = None) -> list:
         async def _run_one(call):
             name, args = call["name"], call["args"]
+            call_id = call.get("id", "")
+
+            await self._emit(on_event, "tool_call_start", {
+                "round": round,
+                "tool_name": name,
+                "tool_args_preview": self._summarize_tool_args(args),
+                "call_id": call_id,
+            })
+
             start = time.monotonic()
             try:
+                current_on_event.set(on_event)
                 result = await asyncio.wait_for(
                     self.capability_registry.tools.execute(name, args),
                     timeout=TOOL_TIMEOUT,
                 )
                 content = str(result)
                 latency = int((time.monotonic() - start) * 1000)
+                status = "ok"
                 logger.info(f"  {name} -> {content[:100]}")
                 trace.tool_call(round, name, args, latency, "ok")
             except asyncio.TimeoutError:
                 content = f"Error: Tool '{name}' execution timed out after {TOOL_TIMEOUT} seconds"
                 latency = int((time.monotonic() - start) * 1000)
+                status = "timeout"
                 logger.error(f"Tool {name} timed out")
                 trace.tool_call(round, name, args, latency, "timeout")
             except Exception as e:
                 content = f"Error: {e}"
                 latency = int((time.monotonic() - start) * 1000)
+                status = "error"
                 logger.error(f"Tool {name} failed: {e}")
                 trace.tool_call(round, name, args, latency, "error")
+
+            await self._emit(on_event, "tool_call_end", {
+                "round": round,
+                "tool_name": name,
+                "latency_ms": latency,
+                "status": status,
+                "result_preview": content[:200],
+            })
+
             return ToolMessage(content=content, tool_call_id=call["id"])
 
         return await asyncio.gather(*[_run_one(tc) for tc in tool_calls])

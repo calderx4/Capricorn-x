@@ -55,7 +55,7 @@
     "enabled": true,
     "message_threshold": 60,
     "messages_to_keep": 20,
-    "token_threshold": 40000,
+    "token_threshold": 80000,
     "max_memory_tokens": 3000,
     "max_history_entries": 100,
     "consolidation_ratio": 0.5

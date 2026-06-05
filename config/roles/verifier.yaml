@@ -11,4 +11,4 @@ tools:
   - edit_file
   - list_files
   - skill_view
-  - todo
+  - tasklist

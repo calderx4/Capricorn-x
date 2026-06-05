@@ -305,11 +305,12 @@ class CapricornAgent:
             logger.debug(f"Using custom API base: {llm_config.api_base}")
 
     async def chat(self, user_input: str, thread_id: str = "default",
-                   images: list = None, attachments: list = None) -> str:
+                   images: list = None, attachments: list = None,
+                   on_event=None) -> str:
         if not self.graph:
             raise RuntimeError("Agent not initialized")
 
-        await self._check_and_consolidate_memory(thread_id)
+        await self._check_and_consolidate_memory(thread_id, on_event=on_event)
 
         notifications = ""
         unread_ids = []
@@ -335,6 +336,7 @@ class CapricornAgent:
         response = await self.graph.run(
             user_input, thread_id, notifications=notifications,
             images=images, attachments=attachments,
+            on_event=on_event,
         )
 
         if unread_ids:
@@ -342,7 +344,7 @@ class CapricornAgent:
 
         return response
 
-    async def _check_and_consolidate_memory(self, thread_id: str):
+    async def _check_and_consolidate_memory(self, thread_id: str, on_event=None):
         """对话前检查：是否需要整合记忆"""
         try:
             mem_cfg = self.config.memory
@@ -361,6 +363,7 @@ class CapricornAgent:
                 history_log=self.history_log,
                 llm_client=self.llm_client,
                 mem_config=mem_cfg,
+                on_event=on_event,
             )
 
         except Exception as e:

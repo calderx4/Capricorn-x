@@ -236,7 +236,7 @@ class TestAttachmentsInPrompt:
         call_args = self.graph._llm_with_tools.ainvoke.call_args[0][0]
         human_msg = call_args[1]
         text_block = human_msg.content[0]["text"]
-        assert "视觉能力" in text_block
+        assert "直接看图回答" in text_block
 
     async def test_attachments_without_images_adds_read_hint(self):
         await self.graph.run(

@@ -5,6 +5,9 @@ Capricorn WebUI
 启动方式：python run.py --mode gateway_with_webui
 """
 
+import html
+import json
+import re
 import requests
 import streamlit as st
 import uuid
@@ -57,6 +60,18 @@ for key, val in [
 ]:
     if key not in st.session_state:
         st.session_state[key] = val
+
+
+# ── Helpers ─────────────────────────────────────────────
+
+def _escape_progress(text):
+    """HTML 转义 + 转义 Markdown 特殊字符防止 Streamlit 误解析。
+    注意：必须避开 html.escape() 生成的实体（如 &#x27;）中的特殊字符。"""
+    text = html.escape(text)
+    text = re.sub(r'(?<!&)\*', '&#42;', text)
+    text = re.sub(r'(?<!&)_', '&#95;', text)
+    text = re.sub(r'(?<!&)#', '&#35;', text)
+    return text
 
 
 # ── API ───────────────────────────────────────────────
@@ -115,6 +130,131 @@ def _send(prompt, images=None, attachments=None):
     elif resp:
         return f"**错误:** {resp.json().get('error', '未知错误')}"
     return "**连接失败:** Gateway 未启动"
+
+
+def _send_streaming(prompt, images=None, attachments=None):
+    """连接 /chat/stream SSE，实时展示执行步骤，返回 (最终回复, 步骤列表)"""
+    payload = {"prompt": prompt, "thread_id": st.session_state.current_thread_id}
+    if images:
+        payload["images"] = images
+    if attachments:
+        payload["attachments"] = attachments
+
+    try:
+        resp = requests.post(
+            f"{API_BASE}/chat/stream", json=payload,
+            stream=True, timeout=500,
+            headers={"Accept": "text/event-stream"},
+        )
+    except Exception:
+        return "**连接失败:** Gateway 未启动", []
+
+    if resp.status_code != 200:
+        try:
+            return f"**错误:** {resp.json().get('error', '未知错误')}", []
+        except Exception:
+            return f"**错误:** HTTP {resp.status_code}", []
+
+    progress_lines = []
+    response_text = ""
+    placeholder = st.empty()
+
+    # Buffer-based SSE 解析（比 iter_lines 更可靠）
+    buffer = ""
+    try:
+        for chunk in resp.iter_content(chunk_size=1024, decode_unicode=True):
+            if not chunk:
+                continue
+            buffer += chunk
+
+            # 按 \n\n 切分出完整的 SSE event block
+            while "\n\n" in buffer:
+                event_block, buffer = buffer.split("\n\n", 1)
+                event_type = None
+                data = {}
+
+                for line in event_block.split("\n"):
+                    if line.startswith("event: "):
+                        event_type = line[7:]
+                    elif line.startswith("data: "):
+                        try:
+                            data = json.loads(line[6:])
+                        except Exception:
+                            pass
+
+                if not event_type:
+                    continue
+
+                if event_type == "thinking":
+                    progress_lines.append(f"🧠 思考中... (第 {data.get('round', '?')} 轮)")
+                elif event_type == "tool_call_start":
+                    name = data.get("tool_name", "?")
+                    args = data.get("tool_args_preview", "")
+                    progress_lines.append(f"🔧 {name}({args})" if args else f"🔧 {name}(...)")
+                elif event_type == "tool_call_end":
+                    name = data.get("tool_name", "?")
+                    latency = data.get("latency_ms", 0)
+                    status = data.get("status", "ok")
+                    icon = "✅" if status == "ok" else ("⏱️" if status == "timeout" else "❌")
+                    progress_lines.append(f"{icon} {name} 完成 ({latency}ms)")
+                elif event_type == "round_end":
+                    round_n = data.get("round", "?")
+                    tc = data.get("tool_count", 0)
+                    progress_lines.append(f"📊 第 {round_n} 轮完成 ({tc} 个工具)")
+                elif event_type == "consolidation_start":
+                    triggered_by = data.get("triggered_by", "")
+                    msg_count = data.get("message_count", 0)
+                    progress_lines.append(f"🗜️ 记忆压缩中... ({triggered_by}, {msg_count} 条消息)")
+                elif event_type == "consolidation_end":
+                    success = data.get("success", True)
+                    icon = "✅" if success else "❌"
+                    progress_lines.append(f"{icon} 记忆压缩{'完成' if success else '失败'}")
+                elif event_type == "tasklist_update":
+                    items = data.get("items", [])
+                    if items:
+                        tl_lines = []
+                        for item in items:
+                            icon = {"pending": "⬜", "in_progress": "🔄", "completed": "✅"}.get(item.get("status"), "⬜")
+                            label = item.get("activeForm") or item.get("content", "")
+                            tl_lines.append(f"{icon} {label}")
+                        progress_lines.append("📋 " + " | ".join(tl_lines))
+                elif event_type == "response":
+                    response_text = data.get("content", "")
+                elif event_type == "done":
+                    placeholder.empty()
+                    return response_text or "（无响应）", progress_lines
+                elif event_type == "error":
+                    placeholder.empty()
+                    return f"**错误:** {data.get('error', '未知错误')}", []
+
+                # 实时更新进度展示（最近 8 条，用 <br> 换行）
+                if progress_lines:
+                    display = progress_lines[-8:]
+                    placeholder.markdown(
+                        "<br>".join(
+                            f"<span style='color: #888; font-size: 0.85em;'>"
+                            f"{_escape_progress(l)}"
+                            f"</span>"
+                            for l in display
+                        ),
+                        unsafe_allow_html=True,
+                    )
+    finally:
+        resp.close()
+
+    placeholder.empty()
+    return response_text or "（无响应）", progress_lines
+
+
+def _render_message(msg):
+    """渲染单条消息（带步骤折叠），if/elif 分支共用"""
+    with st.chat_message(msg["role"]):
+        steps = msg.get("steps")
+        if steps:
+            with st.expander(f"📝 执行步骤 ({len(steps)} 步)", expanded=False):
+                for step in steps:
+                    st.text(step)
+        st.markdown(msg["content"])
 
 
 def _upload_files(files):
@@ -261,21 +401,21 @@ if chat_response:
 
     if prompt.strip():
         st.session_state.messages.append({"role": "user", "content": prompt})
+    # 用和 elif 相同的方式渲染所有消息（避免 Streamlit 元素不匹配导致 ghost）
     for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+        _render_message(msg)
     with st.chat_message("assistant"):
-        with st.spinner("思考中..."):
-            response = _send(prompt, images=images, attachments=attachments)
-        st.markdown(response)
-    st.session_state.messages.append({"role": "assistant", "content": response})
+        response, steps = _send_streaming(prompt, images=images, attachments=attachments)
+    msg = {"role": "assistant", "content": response}
+    if steps:
+        msg["steps"] = steps
+    st.session_state.messages.append(msg)
     st.rerun()
 
 elif st.session_state.messages:
     # 有历史记录 — 显示完整聊天
     for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+        _render_message(msg)
 
 else:
     # 无消息 — 显示欢迎页
@@ -310,13 +450,14 @@ else:
     if st.session_state.get("_pending"):
         p = st.session_state.pop("_pending")
         st.session_state.messages.append({"role": "user", "content": p})
-        with st.chat_message("user"):
-            st.markdown(p)
+        for msg in st.session_state.messages:
+            _render_message(msg)
         with st.chat_message("assistant"):
-            with st.spinner("思考中..."):
-                r = _send(p)
-            st.markdown(r)
-        st.session_state.messages.append({"role": "assistant", "content": r})
+            r, steps = _send_streaming(p)
+        msg = {"role": "assistant", "content": r}
+        if steps:
+            msg["steps"] = steps
+        st.session_state.messages.append(msg)
         st.rerun()
 
 

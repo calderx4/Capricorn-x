@@ -1,6 +1,6 @@
 # Capricorn-x
 
-> v0.2.8 | 原生 Function Calling 驱动的轻量级通用 Agent Runtime
+> v0.2.9 | 原生 Function Calling 驱动的轻量级通用 Agent Runtime
 
 轻量级 Agent Runtime。不约束 LLM 怎么做，只告诉它有什么能用，让它自己规划和决策。
 
@@ -45,19 +45,22 @@ LLM 越强，Capricorn 越薄。不硬编码业务规则，不规定步骤数，
   ▼
 Gateway（aiohttp, Auth, SSE）
   │
-  ├── POST /upload — 文件上传（保存到 workspace）
-  ├── POST /chat   — 对话（支持图片多模态）
+  ├── POST /upload      — 文件上传（保存到 workspace）
+  ├── POST /chat         — 对话（支持图片多模态）
+  ├── POST /chat/stream  — SSE 流式对话（实时推送 FC 循环进度）
   │
   ▼
 Capricorn Agent
   │
   ├── FC 循环      — LLM → tool_calls → execute → repeat
+  ├── SSE 事件     — thinking / tool_call / round / consolidation / response
   ├── 多模态       — 图片通过 base64 注入 LLM 原生视觉
   ├── 三层工具      — builtin / MCP / workflow，自动发现
   ├── Agent Teams   — spawn executor / verifier，LLM 自己决定是否需要
   ├── Cron          — 定时任务，支持角色配置
   ├── 三层记忆      — session / MEMORY.md / HISTORY.md
-  └── BIA 自进化    — 行为规则去重、压缩、上限管理
+  ├── BIA 自进化    — 行为规则去重、压缩、上限管理
+  └── Tasklist      — 任务列表管理，SSE 实时同步
 ```
 
 ### 工具系统
@@ -67,6 +70,23 @@ Capricorn Agent
 - **builtin** — 文件读写、命令执行、任务管理、质量检查等
 - **MCP** — 通过 MCP 协议接入外部服务（搜索、图像理解等）
 - **workflow** — 多步编排的复杂任务
+
+### SSE 流式事件
+
+FC 循环的每一步都通过事件系统实时推送：
+
+| 事件 | 说明 |
+|------|------|
+| `run_start` | Agent 开始执行 |
+| `thinking` | LLM 正在思考 |
+| `tool_call_start` / `tool_call_end` | 工具调用开始 / 完成（含延迟和状态） |
+| `round_start` / `round_end` | FC 循环每轮开始 / 结束 |
+| `consolidation_start` / `consolidation_end` | 记忆整合开始 / 完成 |
+| `tasklist_update` | 任务列表变更 |
+| `response` | 最终回复 |
+| `run_end` | Agent 执行结束 |
+
+通过 `POST /chat/stream`（SSE）或 CLI 模式均可接收。
 
 ### Agent Teams
 
@@ -102,6 +122,7 @@ Capricorn Agent
 | 能力 | 说明 |
 |------|------|
 | FC 循环 | LLM → tool_calls → execute，无 ReAct，无状态机 |
+| SSE 流式 | FC 循环每步实时推送，WebUI / CLI / HTTP 均可接收 |
 | 多模态 | WebUI 上传图片 → base64 注入 LLM 原生视觉理解 |
 | 文件上传 | WebUI 上传文件 → 自动保存到 workspace，Agent 用工具读取 |
 | 三层工具 | builtin / MCP / workflow，自动发现注册 |
@@ -111,6 +132,7 @@ Capricorn Agent
 | BIA 自进化 | 行为规则管理（去重、压缩、上限） |
 | 技能系统 | autoload + on-demand，按需加载领域技能 |
 | Gateway API | HTTP + SSE + 多会话 + 认证 + 文件上传 |
+| Tasklist | 任务列表工具，整表替换模式，SSE 实时同步 |
 
 ---
 
@@ -145,6 +167,19 @@ Capricorn Agent
 ```bash
 pytest tests/ -q
 ```
+
+---
+
+## 版本历史
+
+| 版本 | 主题 |
+|------|------|
+| v0.2.9 | SSE 流式事件 + Tasklist 工具 + 指数退避重试 |
+| v0.2.8 | Memory 优化（整合逻辑重构、配置调优） |
+| v0.2.7 | 文件上传 + 图片多模态 + 安全修复 |
+| v0.2.6 | 简化 LLM 约束 + BIA/memory 上限管理 |
+| v0.2.5 | BIA / Team / Cron / Quality 工具 + 代码简化清理 |
+| v0.2.4 | 初始版本 |
 
 ---
 

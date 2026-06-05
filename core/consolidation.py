@@ -78,16 +78,28 @@ def _compute_cut_point(messages: list, mem_config) -> int:
 
 
 def _adjust_for_tool_calls(messages: list, cut_point: int) -> int:
-    """微调切割点，确保不切在 assistant(tool_calls) 和它的 tool 结果之间。"""
+    """微调切割点，确保：
+    1. 不切在 assistant(tool_calls) 和它的 tool 结果之间
+    2. 剩余消息以 user 消息开头（避免 WebUI 显示 assistant 打头）
+    """
     adjusted = cut_point
 
     # 如果切在了 tool 结果上，退回对应的 assistant 消息
-    while adjusted < len(messages) and messages[adjusted].get("role") == "tool":
+    while 0 < adjusted < len(messages) and messages[adjusted].get("role") == "tool":
         adjusted -= 1
     adjusted += 1
     # 包含该 assistant 的所有 tool 结果
     while adjusted < len(messages) and messages[adjusted].get("role") == "tool":
         adjusted += 1
+
+    # 确保剩余消息以 user 开头：跳过开头的 assistant 消息
+    # 记住调整前位置，若找不到 user 消息则回退（避免清空整个 session）
+    before_user_skip = adjusted
+    while adjusted < len(messages) and messages[adjusted].get("role") != "user":
+        adjusted += 1
+    if adjusted >= len(messages):
+        # 没有找到 user 消息，回退到跳过前的位置
+        adjusted = before_user_skip
 
     return adjusted
 
@@ -102,6 +114,7 @@ async def consolidate_if_needed(
     llm_client,
     mem_config,
     context_label: str = "",
+    on_event=None,
 ) -> bool:
     """检查是否需要整合记忆并执行。
 
@@ -115,6 +128,7 @@ async def consolidate_if_needed(
         llm_client: LLM 客户端
         mem_config: MemoryConfig 对象
         context_label: 日志标签（如 cron 任务名）
+        on_event: 事件回调（用于 SSE 通知客户端）
 
     Returns:
         True = 无需整合或整合成功，False = 整合失败
@@ -130,17 +144,32 @@ async def consolidate_if_needed(
     prefix = f"[{context_label}] " if context_label else ""
     logger.info(f"{prefix}Consolidation triggered by {triggered_by}")
 
+    # 发出 consolidation_start 事件
+    if on_event:
+        from agent.events import safe_emit
+        msg_count = len(messages)
+        token_count = sum(len(str(m.get("content", ""))) // 4 for m in messages)
+        await safe_emit(on_event, "consolidation_start", {
+            "thread_id": session_id,
+            "triggered_by": triggered_by,
+            "message_count": msg_count,
+            "token_count": token_count,
+        })
+
     # 2. 计算切割点
     cut_point = _compute_cut_point(messages, mem_config)
     if cut_point == 0:
         return True
-
     to_consolidate = messages[:cut_point]
 
     # 3. 创建 workflow（只做 LLM 总结，不传阈值常量）
     mc_path = MEMORY_CONSOLIDATION_DIR / "__init__.py"
     if not mc_path.exists():
         logger.warning(f"Memory consolidation workflow not found: {mc_path}")
+        if on_event:
+            await safe_emit(on_event, "consolidation_end", {
+                "thread_id": session_id, "success": False,
+            })
         return False
 
     MCWorkflow = load_class_from_file(mc_path, "MemoryConsolidationWorkflow")
@@ -163,8 +192,13 @@ async def consolidate_if_needed(
         session_manager.rewrite_session(session_id, remaining)
         trace.consolidation(triggered_by, len(messages), len(remaining), True)
         logger.info(f"{prefix}Consolidated {len(messages)} → {len(remaining)} messages")
-        return True
     else:
         trace.consolidation(triggered_by, len(messages), len(messages), False)
         logger.warning(f"{prefix}Consolidation failed")
-        return False
+
+    if on_event:
+        await safe_emit(on_event, "consolidation_end", {
+            "thread_id": session_id, "success": success,
+        })
+
+    return success
