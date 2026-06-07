@@ -18,8 +18,8 @@ class BaseTool(ABC):
 
     @classmethod
     def from_config(cls, config: dict) -> "BaseTool":
-        """从配置创建实例，需要外部依赖的子类覆写此方法"""
-        return cls()
+        """从配置创建实例（workspace_root + sandbox）；需要额外依赖的子类覆写此方法。"""
+        return cls(config.get("workspace_root", "./workspace"), config.get("sandbox", True))
 
     # JSON Schema 类型到 Python 类型的映射
     _TYPE_MAP = {

@@ -83,5 +83,3 @@ def fallback_estimate(text: str) -> int:
         return int(total_chars / 2)
     return int(total_chars / 4)
 
-
-

@@ -57,18 +57,6 @@ class SkillManager:
         """
         return list(self._skills.keys())
 
-    def get_skill(self, name: str) -> Optional[Dict[str, Any]]:
-        """
-        获取技能详情
-
-        Args:
-            name: 技能名称
-
-        Returns:
-            技能数据字典，不存在返回 None
-        """
-        return self._skills.get(name)
-
     def load_skill(self, name: str) -> str:
         """
         加载完整技能内容
@@ -105,22 +93,3 @@ class SkillManager:
             name: data for name, data in self._skills.items()
             if data.get("autoload", False)
         }
-
-    def get_skill_summary(self) -> str:
-        """
-        获取所有可用技能的摘要（XML 格式）
-
-        Returns:
-            XML 格式的技能摘要
-        """
-        available = self.get_available_skills()
-
-        if not available:
-            return ""
-
-        summaries = []
-        for skill_name, skill_data in available.items():
-            summary = SkillLoader.get_summary(skill_data)
-            summaries.append(summary)
-
-        return "<skills>\n" + "\n".join(summaries) + "\n</skills>"

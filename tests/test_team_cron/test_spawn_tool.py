@@ -11,6 +11,7 @@ _spec = importlib.util.spec_from_file_location(
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 SpawnTool = _mod.SpawnTool
+SpawnConfig = _mod.SpawnConfig
 
 
 def _make_mock_tool(name):
@@ -42,15 +43,18 @@ def _make_spawn_tool(tmp_path, roles=None):
                 "tools": ["read_file", "list_files"],
             },
         }
+    config = SpawnConfig(
+        roles=roles,
+        bia_path="",
+        workspace_root=str(tmp_path),
+        max_questions=3,
+    )
     return SpawnTool(
         llm_client=MagicMock(),
         capability_registry=mock_registry,
         skill_manager=MagicMock(),
         long_term_memory=MagicMock(),
-        roles=roles,
-        bia_path="",
-        workspace_root=str(tmp_path),
-        max_questions=3,
+        config=config,
     )
 
 

@@ -132,3 +132,24 @@ def build_bia_section(bia_path: str) -> str:
         "你可以通过 bia_update 工具更新这些规则。\n\n"
         f"{content}"
     )
+
+
+def read_agent_md() -> str:
+    """读取项目根目录的 agent.md，返回格式化的 section 或空字符串。"""
+    agent_md_path = Path("agent.md")
+    if not agent_md_path.exists():
+        return ""
+    content = agent_md_path.read_text(encoding="utf-8").strip()
+    if not content:
+        return ""
+    return f"# Project Context\n\n{content}"
+
+
+def build_simple_workspace_section(root: str, sandbox: bool = True) -> str:
+    """构建简化版 workspace section（供 cron / 子 Agent 使用）。"""
+    sandbox_note = "（沙盒模式）" if sandbox else ""
+    return (
+        f"# Workspace\n\n"
+        f"工作区根目录：`{root}`{sandbox_note}\n"
+        f"路径直接写相对路径，不要加前缀。"
+    )

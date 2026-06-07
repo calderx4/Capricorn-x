@@ -31,13 +31,11 @@ def _resolve_path(path: str, workspace_root: str, sandbox: bool) -> Path:
 class ReadFileTool(BaseTool):
     """读取文件工具"""
 
+    DEFAULT_LIMIT = 2000
+
     def __init__(self, workspace_root: str = "./workspace", sandbox: bool = True):
         self._workspace_root = workspace_root
         self._sandbox = sandbox
-
-    @classmethod
-    def from_config(cls, config: dict) -> "ReadFileTool":
-        return cls(config["workspace_root"], config.get("sandbox", True))
 
     @property
     def name(self) -> str:
@@ -46,8 +44,10 @@ class ReadFileTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "读取文件完整内容（纯文本）。适用场景：查看配置、代码检查、数据分析。\n"
-            "限制：最大 10MB，超过报错。返回文件原始文本内容。"
+            "读取文件内容（纯文本），带行号输出（cat -n 格式）。\n"
+            "参数：path（必填）、offset（0-based 起始行，默认 0）、limit（最大行数，默认 2000）。\n"
+            "适用场景：查看配置、代码检查、数据分析。\n"
+            "限制：最大 10MB，超过报错。"
         )
 
     @property
@@ -58,12 +58,22 @@ class ReadFileTool(BaseTool):
                 "path": {
                     "type": "string",
                     "description": "The path to the file to read"
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Line number to start reading from (0-based). Default: 0",
+                    "minimum": 0
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of lines to read. Default: 2000",
+                    "minimum": 0
                 }
             },
             "required": ["path"]
         }
 
-    async def execute(self, path: str) -> str:
+    async def execute(self, path: str, offset: int = 0, limit: int = 0) -> str:
         try:
             file_path = _resolve_path(path, self._workspace_root, self._sandbox)
 
@@ -76,9 +86,28 @@ class ReadFileTool(BaseTool):
             size = file_path.stat().st_size
             if size > 10 * 1024 * 1024:
                 return f"Error: File too large ({size // 1024 // 1024}MB), max 10MB"
+
             content = file_path.read_text(encoding="utf-8")
-            logger.debug(f"Read file: {path} ({len(content)} chars)")
-            return content
+            lines = content.splitlines()
+
+            # 防护：offset/limit 不允许负数
+            offset = max(0, offset)
+            if limit < 0:
+                limit = 0
+            effective_limit = limit if limit > 0 else self.DEFAULT_LIMIT
+            sliced = lines[offset:offset + effective_limit]
+
+            # cat -n 格式：右对齐行号 + tab + 内容（1-based 显示）
+            total_lines = len(lines)
+            width = len(str(min(offset + effective_limit, total_lines)))
+            formatted = []
+            for i, line in enumerate(sliced):
+                line_num = offset + i + 1  # 1-based
+                formatted.append(f"{line_num:>{width}}\t{line}")
+
+            result = "\n".join(formatted)
+            logger.debug(f"Read file: {path} (lines {offset + 1}-{offset + len(sliced)}, {len(content)} chars)")
+            return result
 
         except ValueError as e:
             return f"Error: {e}"
@@ -94,9 +123,6 @@ class WriteFileTool(BaseTool):
         self._workspace_root = workspace_root
         self._sandbox = sandbox
 
-    @classmethod
-    def from_config(cls, config: dict) -> "WriteFileTool":
-        return cls(config["workspace_root"], config.get("sandbox", True))
 
     @property
     def name(self) -> str:
@@ -150,9 +176,6 @@ class EditFileTool(BaseTool):
         self._workspace_root = workspace_root
         self._sandbox = sandbox
 
-    @classmethod
-    def from_config(cls, config: dict) -> "EditFileTool":
-        return cls(config["workspace_root"], config.get("sandbox", True))
 
     @property
     def name(self) -> str:
@@ -229,9 +252,6 @@ class ListFilesTool(BaseTool):
         self._workspace_root = workspace_root
         self._sandbox = sandbox
 
-    @classmethod
-    def from_config(cls, config: dict) -> "ListFilesTool":
-        return cls(config["workspace_root"], config.get("sandbox", True))
 
     @property
     def name(self) -> str:

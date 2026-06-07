@@ -26,7 +26,7 @@ from core.utils import strip_thinking_tags
 from core import trace
 from core.prompt_utils import (
     build_tools_section, build_skills_section, build_memory_section,
-    build_bia_section, build_prompt,
+    build_bia_section, build_prompt, read_agent_md,
 )
 from agent.events import EventCallback, safe_emit, current_on_event
 
@@ -69,10 +69,6 @@ class CapricornGraph:
         else:
             self._llm_with_tools = None
             logger.warning("LLM client not initialized")
-
-    async def _emit(self, on_event: EventCallback, event_type: str, data: dict):
-        """安全发出事件（委托给 safe_emit）"""
-        await safe_emit(on_event, event_type, data)
 
     async def run(self, user_input: str, thread_id: str = "default",
                   notifications: str = "", images: list = None,
@@ -139,7 +135,7 @@ class CapricornGraph:
         if not self._llm_with_tools:
             return "LLM 客户端未初始化"
 
-        await self._emit(on_event, "run_start", {
+        await safe_emit(on_event, "run_start", {
             "thread_id": thread_id,
             "max_iterations": self.max_iterations,
         })
@@ -153,8 +149,8 @@ class CapricornGraph:
                 logger.info(f"Thinking... (iteration {i + 1})")
                 trace.round_start(i + 1, len(messages))
 
-                await self._emit(on_event, "round_start", {"round": i + 1})
-                await self._emit(on_event, "thinking", {"round": i + 1})
+                await safe_emit(on_event, "round_start", {"round": i + 1})
+                await safe_emit(on_event, "thinking", {"round": i + 1})
 
                 try:
                     for retry in range(3):
@@ -218,7 +214,7 @@ class CapricornGraph:
 
                 round_latency = int((time.monotonic() - round_start_ts) * 1000)
                 trace.round_end(i + 1, len(tool_names), round_latency)
-                await self._emit(on_event, "round_end", {
+                await safe_emit(on_event, "round_end", {
                     "round": i + 1,
                     "tool_count": len(tool_names),
                     "latency_ms": round_latency,
@@ -244,8 +240,8 @@ class CapricornGraph:
                                 reasoning_content=final_rc)
             self.session_manager.save_session(session)
 
-            await self._emit(on_event, "response", {"content": final_response})
-            await self._emit(on_event, "run_end", {
+            await safe_emit(on_event, "response", {"content": final_response})
+            await safe_emit(on_event, "run_end", {
                 "thread_id": thread_id,
                 "total_rounds": i + 1,
                 "tools_used": tools_used,
@@ -259,8 +255,8 @@ class CapricornGraph:
             session.add_message("assistant", error_msg)
             self.session_manager.save_session(session)
             # 即使异常也发出终止事件，确保 SSE 客户端不挂起
-            await self._emit(on_event, "response", {"content": error_msg})
-            await self._emit(on_event, "run_end", {
+            await safe_emit(on_event, "response", {"content": error_msg})
+            await safe_emit(on_event, "run_end", {
                 "thread_id": thread_id,
                 "total_rounds": max(i + 1, 0),
                 "tools_used": tools_used,
@@ -286,7 +282,7 @@ class CapricornGraph:
             name, args = call["name"], call["args"]
             call_id = call.get("id", "")
 
-            await self._emit(on_event, "tool_call_start", {
+            await safe_emit(on_event, "tool_call_start", {
                 "round": round,
                 "tool_name": name,
                 "tool_args_preview": self._summarize_tool_args(args),
@@ -318,7 +314,7 @@ class CapricornGraph:
                 logger.error(f"Tool {name} failed: {e}")
                 trace.tool_call(round, name, args, latency, "error")
 
-            await self._emit(on_event, "tool_call_end", {
+            await safe_emit(on_event, "tool_call_end", {
                 "round": round,
                 "tool_name": name,
                 "latency_ms": latency,
@@ -418,12 +414,7 @@ class CapricornGraph:
             f"- 禁止嵌套 `main/main/`，`main/` 只出现一次"
         )
 
-        agent_md_section = ""
-        agent_md_path = Path("agent.md")
-        if agent_md_path.exists():
-            content = agent_md_path.read_text(encoding="utf-8").strip()
-            if content:
-                agent_md_section = f"# Project Context\n\n{content}"
+        agent_md_section = read_agent_md()
 
         return build_prompt(
             self.system_prompt_path,

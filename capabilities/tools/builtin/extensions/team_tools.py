@@ -12,6 +12,7 @@ import asyncio
 import json
 import re
 import threading
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -270,6 +271,19 @@ class TaskManageTool(BaseTool):
 # ── SpawnTool ────────────────────────────────────────────────────
 
 
+@dataclass
+class SpawnConfig:
+    """SpawnTool 配置（将 12 个参数收敛为一个结构体）"""
+    roles: dict
+    bia_path: str
+    workspace_root: str
+    sandbox: bool = True
+    max_iterations: int = 50
+    max_questions: int = 3
+    max_attempts: int = 3
+    max_concurrent: int = 5
+
+
 class SpawnTool(BaseTool):
     """异步召唤 SubAgent 执行任务，立即返回 task_id"""
 
@@ -309,27 +323,21 @@ class SpawnTool(BaseTool):
         capability_registry,
         skill_manager,
         long_term_memory,
-        roles: dict,
-        bia_path: str,
-        workspace_root: str,
-        sandbox: bool = True,
-        max_iterations: int = 50,
-        max_questions: int = 3,
-        max_attempts: int = 3,
-        max_concurrent: int = 5,
+        config: SpawnConfig,
     ):
         self._llm_client = llm_client
         self._capability_registry = capability_registry
         self._skill_manager = skill_manager
         self._long_term_memory = long_term_memory
-        self._roles = roles
-        self._bia_path = bia_path
-        self._workspace_root = Path(workspace_root)
-        self._sandbox = sandbox
-        self._max_iterations = max_iterations
-        self._max_questions = max_questions
-        self._max_attempts = max_attempts
-        self._max_concurrent = max_concurrent
+        # 从 config 展开到本地属性（保持内部引用不变）
+        self._roles = config.roles
+        self._bia_path = config.bia_path
+        self._workspace_root = Path(config.workspace_root)
+        self._sandbox = config.sandbox
+        self._max_iterations = config.max_iterations
+        self._max_questions = config.max_questions
+        self._max_attempts = config.max_attempts
+        self._max_concurrent = config.max_concurrent
         self._background_tasks: dict[str, asyncio.Task] = {}
 
     async def execute(self, **kwargs) -> str:
@@ -419,15 +427,12 @@ class SpawnTool(BaseTool):
             build_skills_section,
             build_memory_section,
             build_bia_section,
+            build_simple_workspace_section,
         )
 
         return build_prompt(
             prompt_path,
-            workspace_section=(
-                f"# Workspace\n\n"
-                f"工作区根目录：`{self._workspace_root}`（沙盒模式）\n"
-                f"路径直接写相对路径，不要加前缀。"
-            ),
+            workspace_section=build_simple_workspace_section(str(self._workspace_root), sandbox=True),
             bia_section=build_bia_section(self._bia_path),
             memory_section=build_memory_section(self._long_term_memory),
             tools_section=build_tools_section(self._capability_registry),
@@ -449,19 +454,16 @@ class SpawnTool(BaseTool):
         try:
             from agent.agent import CapricornGraph
             from memory.session import SessionManager
-            from memory.history import HistoryLog
             from config.settings import WorkspaceConfig
 
             workspace = WorkspaceConfig(root=str(self._workspace_root), sandbox=self._sandbox)
             session_manager = SessionManager(workspace)
-            history_log = HistoryLog(workspace)
 
             graph = CapricornGraph(
                 capability_registry=self._capability_registry,
                 skill_manager=self._skill_manager,
                 session_manager=session_manager,
                 long_term_memory=self._long_term_memory,
-                history_log=history_log,
                 llm_client=self._llm_client,
                 sandbox=self._sandbox,
                 max_iterations=self._max_iterations,

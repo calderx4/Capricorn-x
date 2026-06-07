@@ -10,7 +10,6 @@ CronScheduler - 定时任务调度器
 
 import asyncio
 import fcntl
-import importlib.util
 import json
 import re
 from datetime import datetime, timedelta
@@ -25,7 +24,7 @@ from loguru import logger
 from config.settings import Config, WorkspaceConfig
 from core.prompt_utils import (
     build_tools_section, build_skills_section, build_memory_section,
-    build_bia_section, build_prompt,
+    build_bia_section, build_prompt, read_agent_md, build_simple_workspace_section,
 )
 from core.utils import atomic_write, short_id, compute_excluded_tools
 from core import trace
@@ -369,20 +368,9 @@ class CronScheduler:
         if not prompt_path:
             raise RuntimeError("No prompt template available for cron job (no cron_prompt_path and no role prompt_path)")
 
-        workspace_section = (
-            f"# Workspace\n\n"
-            f"工作区根目录：`{self.config.workspace.root}`\n"
-            f"路径直接写相对路径，不要加前缀。"
-        )
-
+        workspace_section = build_simple_workspace_section(self.config.workspace.root)
         fresh = job.get("fresh_session", False)
-
-        agent_md_section = ""
-        agent_md_path = Path("agent.md")
-        if agent_md_path.exists():
-            content = agent_md_path.read_text(encoding="utf-8").strip()
-            if content:
-                agent_md_section = f"# Project Context\n\n{content}"
+        agent_md_section = read_agent_md()
 
         return build_prompt(
             prompt_path,

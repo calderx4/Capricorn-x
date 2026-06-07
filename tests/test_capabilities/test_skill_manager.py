@@ -73,19 +73,6 @@ class TestListSkills:
         assert sorted(mgr.list_skills()) == ["alpha", "beta"]
 
 
-class TestGetSkill:
-    def test_existing_returns_data(self, tmp_path):
-        _create_skill(tmp_path, "test", name="test", description="A test skill")
-        mgr = SkillManager(skills_dir=str(tmp_path))
-        data = mgr.get_skill("test")
-        assert data is not None
-        assert data["name"] == "test"
-
-    def test_nonexistent_returns_none(self):
-        mgr = SkillManager()
-        assert mgr.get_skill("nope") is None
-
-
 class TestLoadSkill:
     def test_existing_returns_content(self, tmp_path):
         _create_skill(tmp_path, "test", name="test")
@@ -126,26 +113,3 @@ class TestGetAutoloadSkills:
         _create_skill(tmp_path, "a", name="alpha")
         mgr = SkillManager(skills_dir=str(tmp_path))
         assert mgr.get_autoload_skills() == {}
-
-
-class TestGetSkillSummary:
-    def test_empty_returns_empty_string(self):
-        mgr = SkillManager()
-        assert mgr.get_skill_summary() == ""
-
-    def test_generates_xml_block(self, tmp_path):
-        _create_skill(
-            tmp_path, "pdf", name="pdf",
-            available=True, description="PDF generation",
-        )
-        mgr = SkillManager(skills_dir=str(tmp_path))
-        summary = mgr.get_skill_summary()
-        assert "<skills>" in summary
-        assert "<skill" in summary
-        assert "pdf" in summary
-        assert "</skills>" in summary
-
-    def test_unavailable_skills_excluded(self, tmp_path):
-        _create_skill(tmp_path, "a", name="alpha", available=False)
-        mgr = SkillManager(skills_dir=str(tmp_path))
-        assert mgr.get_skill_summary() == ""

@@ -19,7 +19,6 @@ from capabilities.skills.manager import SkillManager
 from memory.session import SessionManager
 from memory.long_term import LongTermMemory
 from memory.history import HistoryLog
-from core import trace
 from core.paths import (
     PROMPTS_DIR, ROLES_DIR, BUILTIN_EXTENSIONS,
     WORKFLOW_EXTENSIONS, CONFIG_DIR,
@@ -155,11 +154,7 @@ class CapricornAgent:
                 )
                 self.capability_registry.tools.register(task_tool, layer="builtin")
 
-                spawn_tool = _team_mod.SpawnTool(
-                    llm_client=self.llm_client,
-                    capability_registry=self.capability_registry,
-                    skill_manager=self.skill_manager,
-                    long_term_memory=self.long_term_memory,
+                spawn_config = _team_mod.SpawnConfig(
                     roles=self._roles,
                     bia_path=self._bia_path,
                     workspace_root=self.config.workspace.root,
@@ -168,6 +163,13 @@ class CapricornAgent:
                     max_questions=self.config.team.max_questions,
                     max_attempts=self.config.team.max_attempts,
                     max_concurrent=self.config.team.max_concurrent,
+                )
+                spawn_tool = _team_mod.SpawnTool(
+                    llm_client=self.llm_client,
+                    capability_registry=self.capability_registry,
+                    skill_manager=self.skill_manager,
+                    long_term_memory=self.long_term_memory,
+                    config=spawn_config,
                 )
                 self.capability_registry.tools.register(spawn_tool, layer="builtin")
 

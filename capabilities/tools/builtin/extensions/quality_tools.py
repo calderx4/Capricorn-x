@@ -209,10 +209,6 @@ class QualitySignalTool(BaseTool):
         self._workspace_root = workspace_root
         self._sandbox = sandbox
 
-    @classmethod
-    def from_config(cls, config: dict) -> "QualitySignalTool":
-        return cls(config["workspace_root"], config.get("sandbox", True))
-
     @property
     def name(self) -> str:
         return "quality_signal"

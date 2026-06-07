@@ -131,6 +131,21 @@ class Gateway:
             return None, web.json_response({"error": f"prompt too long (max {MAX_PROMPT_LENGTH})"}, status=400)
         return prompt, None
 
+    @staticmethod
+    def _validate_images(images, attachments) -> web.Response | None:
+        """校验 images 和 attachments，返回 error_response 或 None"""
+        if not isinstance(images, list) or not isinstance(attachments, list):
+            return web.json_response({"error": "images and attachments must be arrays"}, status=400)
+        for img in images:
+            if not isinstance(img, dict) or "base64" not in img:
+                return web.json_response({"error": "Each image must be a dict with 'base64' key"}, status=400)
+        if len(images) > 10:
+            return web.json_response({"error": "Too many images (max 10)"}, status=400)
+        total_image_size = sum(len(img.get("base64", "")) * 3 // 4 for img in images)
+        if total_image_size > 20 * 1024 * 1024:
+            return web.json_response({"error": "Images too large (max 20MB total)"}, status=400)
+        return None
+
     def _make_auth_middleware(self):
         """创建 API Key 认证中间件（设置 GATEWAY_API_KEY 环境变量启用）"""
         api_key = self._api_key
@@ -167,20 +182,9 @@ class Gateway:
         images = body.get("images", [])
         attachments = body.get("attachments", [])
 
-        # 类型校验
-        if not isinstance(images, list) or not isinstance(attachments, list):
-            return web.json_response({"error": "images and attachments must be arrays"}, status=400)
-        for img in images:
-            if not isinstance(img, dict) or "base64" not in img:
-                return web.json_response({"error": "Each image must be a dict with 'base64' key"}, status=400)
-
-        # 校验 images 数量和大小
-        if len(images) > 10:
-            return web.json_response({"error": "Too many images (max 10)"}, status=400)
-        # 计算 base64 解码后的实际字节大小
-        total_image_size = sum(len(img.get("base64", "")) * 3 // 4 for img in images)
-        if total_image_size > 20 * 1024 * 1024:
-            return web.json_response({"error": "Images too large (max 20MB total)"}, status=400)
+        err = self._validate_images(images, attachments)
+        if err:
+            return err
 
         try:
             lock = self._get_thread_lock(thread_id)
@@ -212,17 +216,9 @@ class Gateway:
         images = body.get("images", [])
         attachments = body.get("attachments", [])
 
-        # 类型校验（与 /chat 一致）
-        if not isinstance(images, list) or not isinstance(attachments, list):
-            return web.json_response({"error": "images and attachments must be arrays"}, status=400)
-        for img in images:
-            if not isinstance(img, dict) or "base64" not in img:
-                return web.json_response({"error": "Each image must be a dict with 'base64' key"}, status=400)
-        if len(images) > 10:
-            return web.json_response({"error": "Too many images (max 10)"}, status=400)
-        total_image_size = sum(len(img.get("base64", "")) * 3 // 4 for img in images)
-        if total_image_size > 20 * 1024 * 1024:
-            return web.json_response({"error": "Images too large (max 20MB total)"}, status=400)
+        err = self._validate_images(images, attachments)
+        if err:
+            return err
 
         # 初始化 SSE 响应
         resp = web.StreamResponse()
