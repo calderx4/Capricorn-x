@@ -6,43 +6,16 @@ sandbox=True 时限制搜索路径在 workspace 内。
 """
 
 import re
-from pathlib import Path
 from typing import Any, Dict
 
 from loguru import logger
 
 from core.base_tool import BaseTool
-from core.sandbox import check_path
+from core.sandbox import resolve_path as _resolve_path, MAX_FILE_SIZE
 
 # ── 共享常量 ──────────────────────────────────────────────
 MAX_GLOB_RESULTS = 500
 MAX_GREP_RESULTS = 200
-BINARY_CHECK_BYTES = 8192      # 前 8KB 用于检测二进制文件
-MAX_GREP_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-
-
-def _resolve_path(path: str, workspace_root: str, sandbox: bool) -> Path:
-    """解析路径，sandbox 模式下验证在 workspace 内"""
-    p = Path(path)
-    if not p.is_absolute():
-        p = Path(workspace_root) / p
-    p = p.resolve()
-
-    allowed, reason = check_path(str(p), workspace_root, sandbox)
-    if not allowed:
-        raise ValueError(reason)
-
-    return p
-
-
-def _is_binary(file_path: Path) -> bool:
-    """检测文件是否为二进制（前 8KB 含 \\x00 则判定为二进制）"""
-    try:
-        with open(file_path, "rb") as f:
-            chunk = f.read(BINARY_CHECK_BYTES)
-        return b"\x00" in chunk
-    except OSError:
-        return True
 
 
 # ── Glob 工具 ─────────────────────────────────────────────
@@ -200,19 +173,19 @@ class GrepTool(BaseTool):
 
                 # 跳过大文件
                 try:
-                    if file_path.stat().st_size > MAX_GREP_FILE_SIZE:
+                    if file_path.stat().st_size > MAX_FILE_SIZE:
                         continue
                 except OSError:
                     continue
 
-                # 跳过二进制文件
-                if _is_binary(file_path):
-                    continue
-
+                # 单次读取：同时检测二进制 + 提取文本
                 try:
-                    text = file_path.read_text(encoding="utf-8", errors="replace")
+                    raw = file_path.read_bytes()
                 except OSError:
                     continue
+                if b"\x00" in raw[:8192]:
+                    continue
+                text = raw.decode(encoding="utf-8", errors="replace")
 
                 try:
                     rel = str(file_path.relative_to(base))

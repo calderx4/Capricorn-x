@@ -1,6 +1,6 @@
 # Capricorn-x
 
-> v0.2.10 | 原生 Function Calling 驱动的轻量级通用 Agent Runtime
+> v0.2.11 | 原生 Function Calling 驱动的轻量级通用 Agent Runtime
 
 轻量级 Agent Runtime。不约束 LLM 怎么做，只告诉它有什么能用，让它自己规划和决策。
 
@@ -174,6 +174,7 @@ pytest tests/ -q
 
 | 版本 | 主题 |
 |------|------|
+| v0.2.11 | SSE 断连后台执行 + 进度持久化 + sandbox 统一 + config 简化 |
 | v0.2.10 | glob/grep 搜索工具 + read_file offset/limit + 代码简化清理 |
 | v0.2.9 | SSE 流式事件 + Tasklist 工具 + 指数退避重试 |
 | v0.2.8 | Memory 优化（整合逻辑重构、配置调优） |

@@ -128,6 +128,10 @@ class CapricornGraph:
                             images_count=len(images or []),
                             attachments=attachments or [])
 
+        # 立即落盘：确保用户消息在 agent 开始处理前已持久化
+        # 这样即使客户端断连，用户切回来也能从 history 看到自己的消息
+        self.session_manager.save_session(session)
+
         # 记录本轮输入的 messages 结构
         logger.debug(f"[Trace] 输入 messages 结构: {self._summarize_messages(messages)}")
         logger.debug(f"[Trace] 用户输入: {user_input}")

@@ -57,6 +57,8 @@ for key, val in [
     ("session_loaded", False),
     ("unread_count", 0),
     ("manage_mode", False),
+    ("agent_active", False),
+    ("current_progress", []),
 ]:
     if key not in st.session_state:
         st.session_state[key] = val
@@ -99,7 +101,14 @@ def _delete(path, timeout=5):
 
 def _load_history(tid):
     resp = _get(f"/history/{tid}")
-    return resp.json().get("messages", []) if resp and resp.status_code == 200 else []
+    if resp and resp.status_code == 200:
+        data = resp.json()
+        st.session_state.agent_active = data.get("active", False)
+        st.session_state.current_progress = data.get("progress", [])
+        return data.get("messages", [])
+    st.session_state.agent_active = False
+    st.session_state.current_progress = []
+    return []
 
 
 def _switch(tid):
@@ -401,6 +410,8 @@ if chat_response:
 
     if prompt.strip():
         st.session_state.messages.append({"role": "user", "content": prompt})
+    st.session_state.agent_active = True
+    st.session_state.current_progress = []
     # 用和 elif 相同的方式渲染所有消息（避免 Streamlit 元素不匹配导致 ghost）
     for msg in st.session_state.messages:
         _render_message(msg)
@@ -410,12 +421,42 @@ if chat_response:
     if steps:
         msg["steps"] = steps
     st.session_state.messages.append(msg)
+    st.session_state.agent_active = False
     st.rerun()
 
 elif st.session_state.messages:
     # 有历史记录 — 显示完整聊天
     for msg in st.session_state.messages:
         _render_message(msg)
+
+    # 如果 agent 还在后台运行且响应尚未到达，显示思考中
+    if st.session_state.get("agent_active") and st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
+        progress = st.session_state.get("current_progress", [])
+        with st.chat_message("assistant"):
+            if progress:
+                display = progress[-8:]
+                st.markdown(
+                    "<br>".join(
+                        f"<span style='color: #888; font-size: 0.85em;'>"
+                        f"{_escape_progress(l)}"
+                        f"</span>"
+                        for l in display
+                    ),
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    "<span style='color: #888; font-size: 0.9em;'>🧠 思考中...</span>",
+                    unsafe_allow_html=True,
+                )
+
+elif st.session_state.get("agent_active"):
+    # agent 还在跑但 history 还没到（极端时序），显示思考中
+    with st.chat_message("assistant"):
+        st.markdown(
+            "<span style='color: #888; font-size: 0.9em;'>🧠 思考中...</span>",
+            unsafe_allow_html=True,
+        )
 
 else:
     # 无消息 — 显示欢迎页
@@ -450,6 +491,8 @@ else:
     if st.session_state.get("_pending"):
         p = st.session_state.pop("_pending")
         st.session_state.messages.append({"role": "user", "content": p})
+        st.session_state.agent_active = True
+        st.session_state.current_progress = []
         for msg in st.session_state.messages:
             _render_message(msg)
         with st.chat_message("assistant"):
@@ -458,6 +501,7 @@ else:
         if steps:
             msg["steps"] = steps
         st.session_state.messages.append(msg)
+        st.session_state.agent_active = False
         st.rerun()
 
 
@@ -477,5 +521,37 @@ try:
         except Exception:
             pass
     _poll()
+except Exception:
+    pass
+
+# ── Agent 状态轮询 ──────────────────────────────────────
+
+try:
+    @st.fragment(run_every="3s")
+    def _poll_agent():
+        if not st.session_state.get("agent_active"):
+            return
+        tid = st.session_state.current_thread_id
+        try:
+            resp = requests.get(f"{API_BASE}/threads/{tid}/active", timeout=5)
+            if resp and resp.status_code == 200:
+                data = resp.json()
+                if data.get("active", False):
+                    # 仍在运行 — 同步进度显示
+                    new_progress = data.get("progress", [])
+                    if new_progress != st.session_state.get("current_progress", []):
+                        st.session_state.current_progress = new_progress
+                        st.rerun()
+                else:
+                    # agent 已完成 — 加载完整历史并附带进度
+                    st.session_state.agent_active = False
+                    progress = st.session_state.pop("current_progress", [])
+                    st.session_state.messages = _load_history(tid)
+                    if progress and st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
+                        st.session_state.messages[-1]["steps"] = progress
+                    st.rerun()
+        except Exception:
+            pass
+    _poll_agent()
 except Exception:
     pass

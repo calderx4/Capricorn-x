@@ -10,22 +10,8 @@ from typing import Any, Dict
 from loguru import logger
 
 from core.base_tool import BaseTool
-from core.sandbox import check_path
+from core.sandbox import resolve_path as _resolve_path, MAX_FILE_SIZE
 from core.utils import atomic_write
-
-
-def _resolve_path(path: str, workspace_root: str, sandbox: bool) -> Path:
-    """解析路径，sandbox 模式下验证在 workspace 内"""
-    p = Path(path)
-    if not p.is_absolute():
-        p = Path(workspace_root) / p
-    p = p.resolve()
-
-    allowed, reason = check_path(str(p), workspace_root, sandbox)
-    if not allowed:
-        raise ValueError(reason)
-
-    return p
 
 
 class ReadFileTool(BaseTool):
@@ -84,29 +70,36 @@ class ReadFileTool(BaseTool):
                 return f"Error: Not a file: {path}"
 
             size = file_path.stat().st_size
-            if size > 10 * 1024 * 1024:
+            if size > MAX_FILE_SIZE:
                 return f"Error: File too large ({size // 1024 // 1024}MB), max 10MB"
-
-            content = file_path.read_text(encoding="utf-8")
-            lines = content.splitlines()
 
             # 防护：offset/limit 不允许负数
             offset = max(0, offset)
             if limit < 0:
                 limit = 0
             effective_limit = limit if limit > 0 else self.DEFAULT_LIMIT
-            sliced = lines[offset:offset + effective_limit]
 
-            # cat -n 格式：右对齐行号 + tab + 内容（1-based 显示）
-            total_lines = len(lines)
-            width = len(str(min(offset + effective_limit, total_lines)))
-            formatted = []
-            for i, line in enumerate(sliced):
-                line_num = offset + i + 1  # 1-based
-                formatted.append(f"{line_num:>{width}}\t{line}")
+            # 逐行读取，跳过 offset 前的行，最多读 effective_limit 行
+            collected = []
+            end_line = offset + effective_limit
+            with open(file_path, "r", encoding="utf-8") as f:
+                for line_idx, line in enumerate(f):
+                    line_num = line_idx + 1  # 1-based
+                    if line_num <= offset:
+                        continue
+                    if line_num > end_line:
+                        break
+                    collected.append((line_num, line.rstrip("\n")))
 
-            result = "\n".join(formatted)
-            logger.debug(f"Read file: {path} (lines {offset + 1}-{offset + len(sliced)}, {len(content)} chars)")
+            if not collected:
+                return ""
+
+            # cat -n 格式：右对齐行号 + tab + 内容，位数按实际最大行号
+            width = len(str(collected[-1][0]))
+            result = "\n".join(
+                f"{num:>{width}}\t{text}" for num, text in collected
+            )
+            logger.debug(f"Read file: {path} (lines {collected[0][0]}-{collected[-1][0]}, {size} bytes)")
             return result
 
         except ValueError as e:

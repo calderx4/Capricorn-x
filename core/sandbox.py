@@ -7,6 +7,38 @@ sandbox=true 时，所有文件操作和 exec 的路径必须限定在 workspace
 from pathlib import Path
 
 
+# ── 文件操作共享常量 ──────────────────────────────────────
+MAX_FILE_SIZE = 10 * 1024 * 1024   # 10MB — read_file / grep 共用
+BINARY_CHECK_BYTES = 8192          # 前 8KB 用于检测二进制文件
+
+
+def resolve_path(path: str, workspace_root: str, sandbox: bool) -> Path:
+    """解析路径，sandbox 模式下验证在 workspace 内。
+
+    被 file_tools / search_tools 等所有文件工具共用。
+    """
+    p = Path(path)
+    if not p.is_absolute():
+        p = Path(workspace_root) / p
+    p = p.resolve()
+
+    allowed, reason = check_path(str(p), workspace_root, sandbox)
+    if not allowed:
+        raise ValueError(reason)
+
+    return p
+
+
+def is_binary(file_path: Path) -> bool:
+    """检测文件是否为二进制（前 8KB 含 \\x00 则判定为二进制）"""
+    try:
+        with open(file_path, "rb") as f:
+            chunk = f.read(BINARY_CHECK_BYTES)
+        return b"\x00" in chunk
+    except OSError:
+        return True
+
+
 def check_path(path: str, root: str, sandbox: bool) -> tuple[bool, str]:
     """
     检查路径是否在沙盒范围内。

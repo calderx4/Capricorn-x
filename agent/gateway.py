@@ -75,6 +75,9 @@ class Gateway:
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self._running_tasks: Dict[str, asyncio.Task] = {}
         self._thread_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
+        self._background_tasks: set = set()  # 客户端断连后继续在后台运行的 agent 任务
+        self._active_threads: Dict[str, asyncio.Task] = {}  # thread_id → 正在运行的 agent task
+        self._thread_progress: Dict[str, list] = {}  # thread_id → 格式化的进度行（断连后仍可查询）
         self._api_key = os.environ.get("GATEWAY_API_KEY", "")
         self._default_task_timeout = config.gateway.task_timeout
 
@@ -93,6 +96,7 @@ class Gateway:
             web.get("/task/{task_id}", self._handle_task_status),
             web.get("/sessions", self._handle_sessions),
             web.get("/history/{thread_id}", self._handle_history),
+            web.get("/threads/{thread_id}/active", self._handle_thread_active),
             web.delete("/sessions/{thread_id}", self._handle_session_delete),
             web.get("/jobs", self._handle_jobs),
             web.get("/health", self._handle_health),
@@ -229,15 +233,21 @@ class Gateway:
 
         sink = QueueEventSink(maxsize=200)
         agent_task = None
+        self._thread_progress[thread_id] = []  # 每次新 streaming 请求重置
+        progress = self._thread_progress[thread_id]
 
         async def _run_agent():
             try:
                 lock = self._get_thread_lock(thread_id)
                 async with lock:
+                    # 包装 on_event：同时存储进度行，确保断连后仍可查询
+                    async def _on_event(event_type, data):
+                        self._append_progress(progress, event_type, data)
+                        await sink.emit(event_type, data)
                     await self.agent.chat(
                         prompt, thread_id=thread_id,
                         images=images, attachments=attachments,
-                        on_event=sink.emit,
+                        on_event=_on_event,
                     )
             except asyncio.CancelledError:
                 logger.debug("SSE /chat/stream agent task cancelled")
@@ -251,6 +261,7 @@ class Gateway:
         try:
             # 启动 agent task
             agent_task = asyncio.create_task(_run_agent())
+            self._active_threads[thread_id] = agent_task
 
             # 流式读取事件
             while True:
@@ -290,12 +301,21 @@ class Gateway:
                 pass
         finally:
             if agent_task and not agent_task.done():
-                agent_task.cancel()
-            if agent_task:
-                try:
-                    await agent_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                # 客户端断连 — 让 agent 在后台继续运行
+                # 结果会保存到 session history，用户切回来时可以获取
+                logger.info(f"SSE client disconnected, agent for thread '{thread_id}' continues in background")
+                self._background_tasks.add(agent_task)
+                agent_task.add_done_callback(self._background_tasks.discard)
+                agent_task.add_done_callback(self._log_background_exception)
+                # agent 完成后清理 _active_threads 和 _thread_progress
+                def _cleanup_bg(t, tid=thread_id):
+                    self._active_threads.pop(tid, None)
+                    self._thread_progress.pop(tid, None)
+                agent_task.add_done_callback(_cleanup_bg)
+            elif agent_task:
+                # agent 正常完成，立即清除
+                self._active_threads.pop(thread_id, None)
+            # 不 await — SSE handler 立即返回，agent 在后台完成
 
         return resp
 
@@ -526,16 +546,34 @@ class Gateway:
         thread_id = request.match_info["thread_id"]
         if not THREAD_ID_RE.fullmatch(thread_id):
             return web.json_response({"error": "Invalid thread_id"}, status=400)
-        session = self.agent.session_manager.load_session(thread_id)
-        if not session:
-            return web.json_response({"messages": []})
+        # 用 get_session() 而非 load_session()：优先读内存缓存，
+        # 确保 agent 正在运行时也能拿到已添加但未落盘的用户消息
+        session = self.agent.session_manager.get_session(thread_id)
         display = []
         for msg in session.messages:
             role = msg.get("role")
             content = msg.get("content", "")
             if role in ("user", "assistant") and content and content.strip() and not msg.get("tool_calls"):
                 display.append({"role": role, "content": content})
-        return web.json_response({"messages": display})
+        task = self._active_threads.get(thread_id)
+        active = task is not None and not task.done()
+        return web.json_response({
+            "messages": display,
+            "active": active,
+            "progress": self._thread_progress.get(thread_id, []),
+        })
+
+    async def _handle_thread_active(self, request: web.Request) -> web.Response:
+        """GET /threads/{thread_id}/active — 查询线程是否有 agent 正在运行"""
+        thread_id = request.match_info["thread_id"]
+        if not THREAD_ID_RE.fullmatch(thread_id):
+            return web.json_response({"error": "Invalid thread_id"}, status=400)
+        task = self._active_threads.get(thread_id)
+        active = task is not None and not task.done()
+        return web.json_response({
+            "active": active,
+            "progress": self._thread_progress.get(thread_id, []),
+        })
 
     async def _handle_session_delete(self, request: web.Request) -> web.Response:
         """DELETE /sessions/{thread_id} — 删除会话"""
@@ -544,6 +582,7 @@ class Gateway:
             return web.json_response({"error": "Invalid thread_id"}, status=400)
         self.agent.session_manager.clear_session(thread_id)
         self._thread_locks.pop(thread_id, None)
+        self._thread_progress.pop(thread_id, None)
         return web.json_response({"ok": True})
 
     # ── Thread Lock LRU ───────────────────────────────
@@ -561,6 +600,57 @@ class Gateway:
                 break  # 最早的锁正在使用，停止淘汰
             self._thread_locks.popitem(last=False)
         return lock
+
+    @staticmethod
+    def _log_background_exception(task: asyncio.Task):
+        """后台 agent 任务的异常日志回调，防止未观察到的异常"""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.error(f"Background agent task failed: {exc}")
+
+    @staticmethod
+    def _append_progress(progress: list, event_type: str, event_data: dict):
+        """将 SSE 事件格式化为进度行并追加到列表"""
+        line = None
+        if event_type == "thinking":
+            line = f"🧠 思考中... (第 {event_data.get('round', '?')} 轮)"
+        elif event_type == "tool_call_start":
+            name = event_data.get("tool_name", "?")
+            args = event_data.get("tool_args_preview", "")
+            line = f"🔧 {name}({args})" if args else f"🔧 {name}(...)"
+        elif event_type == "tool_call_end":
+            name = event_data.get("tool_name", "?")
+            latency = event_data.get("latency_ms", 0)
+            status = event_data.get("status", "ok")
+            icon = "✅" if status == "ok" else ("⏱️" if status == "timeout" else "❌")
+            line = f"{icon} {name} 完成 ({latency}ms)"
+        elif event_type == "round_end":
+            round_n = event_data.get("round", "?")
+            tc = event_data.get("tool_count", 0)
+            line = f"📊 第 {round_n} 轮完成 ({tc} 个工具)"
+        elif event_type == "consolidation_start":
+            triggered_by = event_data.get("triggered_by", "")
+            msg_count = event_data.get("message_count", 0)
+            line = f"🗜️ 记忆压缩中... ({triggered_by}, {msg_count} 条消息)"
+        elif event_type == "consolidation_end":
+            success = event_data.get("success", True)
+            icon = "✅" if success else "❌"
+            line = f"{icon} 记忆压缩{'完成' if success else '失败'}"
+        elif event_type == "tasklist_update":
+            items = event_data.get("items", [])
+            if items:
+                tl = []
+                for item in items:
+                    ic = {"pending": "⬜", "in_progress": "🔄", "completed": "✅"}.get(item.get("status"), "⬜")
+                    tl.append(f"{ic} {item.get('activeForm') or item.get('content', '')}")
+                line = "📋 " + " | ".join(tl)
+        if line is not None:
+            progress.append(line)
+            # 上限保护：超过 500 行时截断旧数据
+            if len(progress) > 500:
+                del progress[:len(progress) - 500]
 
     # ── 异步任务执行 ──────────────────────────────────
 

@@ -148,14 +148,14 @@ class TestComputeExcludedTools:
 
     def test_default_exclusions(self, tmp_path):
         tool = _make_spawn_tool(tmp_path)
-        role = tool._roles["executor"]
+        role = tool._config.roles["executor"]
         excluded = tool._compute_excluded_tools(role)
         for name in _mod.MUST_EXCLUDE_TOOLS:
             assert name in excluded
 
     def test_verifier_whitelist(self, tmp_path):
         tool = _make_spawn_tool(tmp_path)
-        role = tool._roles["verifier"]
+        role = tool._config.roles["verifier"]
         excluded = tool._compute_excluded_tools(role)
         assert "read_file" not in excluded
         assert "list_files" not in excluded

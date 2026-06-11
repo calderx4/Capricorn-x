@@ -329,36 +329,30 @@ class SpawnTool(BaseTool):
         self._capability_registry = capability_registry
         self._skill_manager = skill_manager
         self._long_term_memory = long_term_memory
-        # 从 config 展开到本地属性（保持内部引用不变）
-        self._roles = config.roles
-        self._bia_path = config.bia_path
-        self._workspace_root = Path(config.workspace_root)
-        self._sandbox = config.sandbox
-        self._max_iterations = config.max_iterations
-        self._max_questions = config.max_questions
-        self._max_attempts = config.max_attempts
-        self._max_concurrent = config.max_concurrent
+        self._config = config
         self._background_tasks: dict[str, asyncio.Task] = {}
 
     async def execute(self, **kwargs) -> str:
-        if len(self._background_tasks) >= self._max_concurrent:
-            return json.dumps({"error": f"已达到最大并发任务数（{self._max_concurrent}）"}, ensure_ascii=False)
+        cfg = self._config
+        if len(self._background_tasks) >= cfg.max_concurrent:
+            return json.dumps({"error": f"已达到最大并发任务数（{cfg.max_concurrent}）"}, ensure_ascii=False)
 
         role_name = kwargs.get("role", "executor")
         prompt = kwargs.get("prompt", "")
         retry_feedback = kwargs.get("retry_feedback", "")
 
-        if role_name not in self._roles:
-            return f"Error: 未知角色 '{role_name}'，可用: {list(self._roles.keys())}"
+        if role_name not in cfg.roles:
+            return f"Error: 未知角色 '{role_name}'，可用: {list(cfg.roles.keys())}"
 
-        role = self._roles[role_name]
+        role = cfg.roles[role_name]
         prompt_path = role.get("prompt_path")
         if not prompt_path or not Path(prompt_path).exists():
             return f"Error: 角色 '{role_name}' 的 prompt 模板不存在"
 
         # 1. 创建任务目录和文件
         task_id = f"task_{short_id()}"
-        task_dir = self._workspace_root / "team" / "tasks" / task_id
+        workspace = Path(cfg.workspace_root)
+        task_dir = workspace / "team" / "tasks" / task_id
         task_dir.mkdir(parents=True, exist_ok=True)
         (task_dir / "questions").mkdir(exist_ok=True)
 
@@ -371,14 +365,14 @@ class SpawnTool(BaseTool):
             "status": STATUS_PRODUCING,
             "assigned_role": role_name,
             "attempts": 0,
-            "max_attempts": self._max_attempts,
+            "max_attempts": cfg.max_attempts,
             "question_count": 0,
-            "max_questions": self._max_questions,
+            "max_questions": cfg.max_questions,
             "output_path": f"team/tasks/{task_id}/result.md",
             "created_at": _now_ts(),
             "updated_at": _now_ts(),
         }
-        tasks_dir = self._workspace_root / "team" / "tasks"
+        tasks_dir = workspace / "team" / "tasks"
         tasks_dir.mkdir(parents=True, exist_ok=True)
         atomic_write(
             tasks_dir / f"{task_id}.json",
@@ -416,7 +410,7 @@ class SpawnTool(BaseTool):
             f"`team/tasks/{task_id}/questions/` 目录\n"
             f"  文件名递增：`1.json`、`2.json`、`3.json`\n"
             f"  格式：{{\"message\": \"具体问题描述\", \"can_continue\": false}}\n"
-            f"- 最多问 **{self._max_questions}** 个问题，超过后任务会被标记为需要重新创建\n"
+            f"- 最多问 **{self._config.max_questions}** 个问题，超过后任务会被标记为需要重新创建\n"
         )
         return "".join(parts)
 
@@ -432,8 +426,8 @@ class SpawnTool(BaseTool):
 
         return build_prompt(
             prompt_path,
-            workspace_section=build_simple_workspace_section(str(self._workspace_root), sandbox=True),
-            bia_section=build_bia_section(self._bia_path),
+            workspace_section=build_simple_workspace_section(self._config.workspace_root, sandbox=True),
+            bia_section=build_bia_section(self._config.bia_path),
             memory_section=build_memory_section(self._long_term_memory),
             tools_section=build_tools_section(self._capability_registry),
             skills_section=build_skills_section(self._skill_manager),
@@ -449,15 +443,17 @@ class SpawnTool(BaseTool):
         exclude_tools: list,
     ):
         # producing → running（经状态机校验，attempts 自增）
-        _transition_task(self._workspace_root, task_id, STATUS_RUNNING)
+        cfg = self._config
+        workspace_root = Path(cfg.workspace_root)
+        _transition_task(workspace_root, task_id, STATUS_RUNNING)
 
         try:
             from agent.agent import CapricornGraph
             from memory.session import SessionManager
             from config.settings import WorkspaceConfig
 
-            workspace = WorkspaceConfig(root=str(self._workspace_root), sandbox=self._sandbox)
-            session_manager = SessionManager(workspace)
+            ws = WorkspaceConfig(root=str(workspace_root), sandbox=cfg.sandbox)
+            session_manager = SessionManager(ws)
 
             graph = CapricornGraph(
                 capability_registry=self._capability_registry,
@@ -465,8 +461,8 @@ class SpawnTool(BaseTool):
                 session_manager=session_manager,
                 long_term_memory=self._long_term_memory,
                 llm_client=self._llm_client,
-                sandbox=self._sandbox,
-                max_iterations=self._max_iterations,
+                sandbox=cfg.sandbox,
+                max_iterations=cfg.max_iterations,
                 exclude_tools=exclude_tools,
                 system_prompt_override=system_prompt,
             )
@@ -474,16 +470,16 @@ class SpawnTool(BaseTool):
             result = await graph.run(enhanced_prompt, thread_id=f"spawn_{task_id}")
 
             # 写入结果
-            result_path = self._workspace_root / "team" / "tasks" / task_id / "result.md"
+            result_path = workspace_root / "team" / "tasks" / task_id / "result.md"
             atomic_write(result_path, result)
 
             # 检查问题文件
-            questions_dir = self._workspace_root / "team" / "tasks" / task_id / "questions"
+            questions_dir = workspace_root / "team" / "tasks" / task_id / "questions"
             question_count = len(list(questions_dir.glob("*.json"))) if questions_dir.exists() else 0
 
             # running → done / need_decision
             final_status = STATUS_NEED_DECISION if question_count > 0 else STATUS_DONE
-            updated = _transition_task(self._workspace_root, task_id, final_status, {
+            updated = _transition_task(workspace_root, task_id, final_status, {
                 "question_count": question_count,
             })
             if not updated:
@@ -491,7 +487,7 @@ class SpawnTool(BaseTool):
 
         except Exception as e:
             logger.exception(f"Task {task_id} failed: {e}")
-            updated = _transition_task(self._workspace_root, task_id, STATUS_ERROR, {
+            updated = _transition_task(workspace_root, task_id, STATUS_ERROR, {
                 "error": str(e)[:500],
             })
             if not updated:

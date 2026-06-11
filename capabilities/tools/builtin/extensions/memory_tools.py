@@ -16,7 +16,7 @@ from config.settings import WorkspaceConfig
 class MemoryUpdateTool(BaseTool):
     """主动更新长期记忆工具"""
 
-    def __init__(self, workspace_root: str = "./workspace", sandbox: bool = True):
+    def __init__(self, workspace_root: str = "./workspace", **_kwargs):
         ws_config = WorkspaceConfig(root=workspace_root)
         self._memory = LongTermMemory(ws_config)
 
@@ -66,7 +66,7 @@ class MemoryUpdateTool(BaseTool):
 class HistorySearchTool(BaseTool):
     """搜索历史记录工具"""
 
-    def __init__(self, workspace_root: str = "./workspace", sandbox: bool = True):
+    def __init__(self, workspace_root: str = "./workspace", **_kwargs):
         ws_config = WorkspaceConfig(root=workspace_root)
         self._history = HistoryLog(ws_config)
 
