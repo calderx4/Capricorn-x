@@ -153,7 +153,10 @@ class CronTool(BaseTool):
         if not kwargs.get("schedule"):
             return "Error: 'schedule' is required for create action"
 
-        job = await self._scheduler.create_job(**kwargs)
+        # 捕获当前对话来源（通过 scheduler 公共方法读取 ContextVar）
+        source = self._scheduler.get_current_source()
+
+        job = await self._scheduler.create_job(source=source, **kwargs)
         return f"定时任务已创建:\n{json.dumps(job, ensure_ascii=False, indent=2)}"
 
     def _handle_list(self) -> str:

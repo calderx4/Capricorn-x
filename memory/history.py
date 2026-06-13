@@ -7,6 +7,7 @@ History Log - 历史日志管理
 - 提供搜索接口
 """
 
+import re
 from typing import List
 from loguru import logger
 
@@ -37,7 +38,7 @@ class HistoryLog:
             return
         try:
             lines = self.file_path.read_text(encoding="utf-8").split("\n")
-            entry_indices = [i for i, l in enumerate(lines) if l.strip().startswith("[2")]
+            entry_indices = [i for i, l in enumerate(lines) if re.match(r"^\[\d{4}-", l.strip())]
             if len(entry_indices) <= self._max_entries:
                 return
             cut = entry_indices[-self._max_entries]

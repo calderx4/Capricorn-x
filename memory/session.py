@@ -39,7 +39,7 @@ class Session:
         self.messages.append({"role": role, "content": content, **kwargs})
 
     def get_history(self) -> List[Dict[str, Any]]:
-        return self.messages
+        return list(self.messages)
 
 
 class SessionManager:

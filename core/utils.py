@@ -63,10 +63,7 @@ def load_class_from_file(path, class_name):
     Raises:
         AttributeError: 文件中不存在指定类名
     """
-    path = Path(path)
-    spec = importlib.util.spec_from_file_location(path.stem, path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    mod = load_module_from_file(path)
     return getattr(mod, class_name)
 
 

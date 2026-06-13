@@ -148,7 +148,10 @@ async def consolidate_if_needed(
     if on_event:
         from agent.events import safe_emit
         msg_count = len(messages)
-        token_count = sum(len(str(m.get("content", ""))) // 4 for m in messages)
+        from core.token_counter import TokenCounter
+        token_count = TokenCounter.estimate_tokens(
+            " ".join(str(m.get("content", "")) for m in messages)
+        )
         await safe_emit(on_event, "consolidation_start", {
             "thread_id": session_id,
             "triggered_by": triggered_by,

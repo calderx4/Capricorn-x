@@ -20,6 +20,7 @@ from agent.executor import CapricornAgent
 from agent.events import PrintEventSink
 from agent.gateway import Gateway
 from agent.notification import NotificationBus
+from agent.channels.manager import ChannelManager
 from config.settings import Config
 from loguru import logger
 
@@ -87,7 +88,8 @@ class CapricornCLI:
                     os.system('clear' if os.name == 'posix' else 'cls')
                     continue
 
-                response = await self.agent.chat(user_input, on_event=sink.emit)
+                response = await self.agent.chat(user_input, on_event=sink.emit,
+                                                  source={"type": "cli"})
                 print(f"\n🤖 Assistant: {response}\n")
 
             except KeyboardInterrupt:
@@ -100,13 +102,23 @@ class CapricornCLI:
                 print(f"\n❌ 错误: {e}\n")
 
     async def _run_gateway(self, webui: bool = False):
-        """Gateway 模式（HTTP + Cron，可选 WebUI）"""
+        """Gateway 模式（HTTP + Cron + Channels，可选 WebUI）"""
         gateway = Gateway(self.agent, self.config, notification_bus=self.notification_bus, webui=webui)
 
         tasks = [asyncio.create_task(gateway.start())]
 
         if self.agent._cron_scheduler:
             tasks.append(asyncio.create_task(self.agent._cron_scheduler.run()))
+
+        # 启动 Channel Manager（飞书、QQ 等）
+        channel_manager = ChannelManager(self.agent, self.config)
+        channel_manager.load_channels()
+        if channel_manager.channels:
+            tasks.append(asyncio.create_task(channel_manager.start_all()))
+
+        # 接线：CronScheduler → ChannelManager（cron 结果推送到来源 channel）
+        if self.agent._cron_scheduler and channel_manager.channels:
+            self.agent._cron_scheduler.set_channel_manager(channel_manager)
 
         print(f"✓ Gateway API: http://{self.config.gateway.host}:{self.config.gateway.port}")
 
@@ -132,6 +144,7 @@ class CapricornCLI:
         try:
             await asyncio.gather(*tasks)
         finally:
+            await channel_manager.stop_all()
             if streamlit_proc:
                 streamlit_proc.terminate()
 

@@ -13,6 +13,8 @@ from core.base_workflow import BaseWorkflow
 class TestWorkflow(BaseWorkflow):
     """自检工作流 - 验证核心能力是否可用"""
 
+    auto_discover = False  # 仅测试用，不自动注册到生产工具表
+
     @property
     def name(self) -> str:
         return "self_test"

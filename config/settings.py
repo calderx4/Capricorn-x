@@ -109,6 +109,21 @@ class GatewayConfig(BaseModel):
     task_timeout: int = Field(default=600, gt=0)
 
 
+class FeishuConfig(BaseModel):
+    """飞书 Channel 配置"""
+
+    enabled: bool = False
+    app_id: str = ""
+    app_secret: str = ""
+    allow_from: list[str] = Field(default_factory=lambda: ["*"])
+
+
+class ChannelsConfig(BaseModel):
+    """多平台 Channel 配置"""
+
+    feishu: FeishuConfig = Field(default_factory=FeishuConfig)
+
+
 class Config(BaseModel):
     """主配置类"""
 
@@ -122,6 +137,7 @@ class Config(BaseModel):
     cron: CronConfig = Field(default_factory=CronConfig)
     team: TeamConfig = Field(default_factory=TeamConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
 
     @classmethod
     def load(cls, config_path: str) -> "Config":

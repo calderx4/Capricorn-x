@@ -9,6 +9,7 @@ Executor - Agent 执行器
 
 from typing import Optional
 from pathlib import Path
+from contextvars import ContextVar
 from loguru import logger
 from langchain_core.messages import AIMessage
 
@@ -66,6 +67,10 @@ def _ensure_lc_openai_extras_patch():
                     d[k] = v
         return d
     _lc_base._convert_message_to_dict = _to_dict_with_extras
+
+
+# 当前对话来源（contextvars 保障并发安全，CronTool 创建任务时读取）
+_current_source: ContextVar[dict | None] = ContextVar("_current_source", default=None)
 
 
 class CapricornAgent:
@@ -221,6 +226,7 @@ class CapricornAgent:
                 bia_path=self._bia_path,
                 roles=self._roles,
                 active_dir=str(self._active_dir),
+                agent=self,
             )
 
             cron_tool = CronTool(self._cron_scheduler)
@@ -308,10 +314,25 @@ class CapricornAgent:
 
     async def chat(self, user_input: str, thread_id: str = "default",
                    images: list = None, attachments: list = None,
-                   on_event=None) -> str:
+                   on_event=None, source: dict = None,
+                   extra_system_prompt: str = "") -> str:
         if not self.graph:
             raise RuntimeError("Agent not initialized")
 
+        # 设置 source（CronTool 创建任务时读取，ContextVar 保障并发安全）
+        if source is None:
+            source = {"type": "cli"} if thread_id == "default" else {"type": "gateway"}
+        token = _current_source.set(source)
+        try:
+            return await self._chat_inner(user_input, thread_id, images, attachments, on_event,
+                                          extra_system_prompt=extra_system_prompt)
+        finally:
+            _current_source.reset(token)
+
+    async def _chat_inner(self, user_input: str, thread_id: str,
+                           images: list, attachments: list,
+                           on_event, extra_system_prompt: str = "") -> str:
+        """chat() 的内部实现（_current_source 已设置）。"""
         await self._check_and_consolidate_memory(thread_id, on_event=on_event)
 
         notifications = ""
@@ -339,6 +360,7 @@ class CapricornAgent:
             user_input, thread_id, notifications=notifications,
             images=images, attachments=attachments,
             on_event=on_event,
+            extra_system_prompt=extra_system_prompt,
         )
 
         if unread_ids:

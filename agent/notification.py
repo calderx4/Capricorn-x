@@ -10,6 +10,7 @@ NotificationBus - 事件通知总线
 import asyncio
 import json
 import uuid
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List
@@ -126,8 +127,6 @@ class NotificationBus:
             return []
         try:
             with open(self._path, "r", encoding="utf-8") as f:
-                # deque 保留最后 n 行
-                from collections import deque
                 tail_lines = deque(f, maxlen=n)
             results = []
             for line in tail_lines:

@@ -140,8 +140,10 @@ class CronScheduler:
         self._cron_prompt_path = None  # 垂类提供的 cron prompt 路径
         self._bia_path = None
         self._roles = {}  # 角色配置
+        self._agent = None  # CapricornAgent 引用（CronTool 读取 _current_source）
+        self._channel_manager = None  # ChannelManager（结果推送到 channel）
 
-    def initialize(self, llm_client, capability_registry, skill_manager, long_term_memory, notification_bus=None, cron_prompt_path=None, bia_path=None, roles=None, active_dir=None):
+    def initialize(self, llm_client, capability_registry, skill_manager, long_term_memory, notification_bus=None, cron_prompt_path=None, bia_path=None, roles=None, active_dir=None, agent=None):
         """注入主 Agent 的共享组件"""
         self._llm_client = llm_client
         self._capability_registry = capability_registry
@@ -152,8 +154,20 @@ class CronScheduler:
         self._bia_path = bia_path
         self._roles = roles or {}
         self._active_dir = Path(active_dir) if active_dir else None
+        self._agent = agent
         self._initialized = True
         logger.info(f"CronScheduler initialized (roles: {list(self._roles.keys())})")
+
+    def set_channel_manager(self, channel_manager):
+        """设置 ChannelManager（run.py 创建后注入，用于结果推送）。"""
+        self._channel_manager = channel_manager
+
+    def get_current_source(self) -> dict | None:
+        """获取当前对话来源（CronTool 创建任务时调用，读取 ContextVar）。"""
+        if not self._agent:
+            return None
+        from agent.executor import _current_source
+        return _current_source.get()
 
     # ── 任务管理（async，受 asyncio.Lock 保护）──────────
 
@@ -184,6 +198,7 @@ class CronScheduler:
                 "repeat": kwargs.get("repeat"),
                 "end_at": kwargs.get("end_at"),
                 "tags": kwargs.get("tags", []),
+                "source": kwargs.get("source"),  # 创建来源 {"type":"feishu","chat_id":"ou_xxx"}
             }
 
             jobs = self._load_jobs()
@@ -346,6 +361,9 @@ class CronScheduler:
                         "message": (result or "")[:500],
                     })
 
+                # 推送结果到来源 channel（飞书等）
+                await self._deliver_to_source(job, result, last_run_status)
+
                 # 更新下次执行时间
                 async with self._lock:
                     jobs = self._load_jobs()
@@ -354,6 +372,41 @@ class CronScheduler:
 
         finally:
             self._release_lock()
+
+    async def _deliver_to_source(self, job: dict, result: str, status: str):
+        """将 cron 结果推送到来源 channel（飞书等），失败时不影响 NotificationBus。"""
+        source = job.get("source")
+        if not source:
+            return  # 旧任务或 gateway/CLI 来源 — NotificationBus 已处理
+
+        source_type = source.get("type")
+        if source_type in ("gateway", "cli"):
+            return  # NotificationBus 已处理
+
+        chat_id = source.get("chat_id")
+        if not chat_id:
+            logger.warning(f"[Cron] Job {job['id']} has source type '{source_type}' but no chat_id")
+            return
+
+        if not self._channel_manager:
+            logger.debug(f"[Cron] Job {job['id']} targets '{source_type}' but ChannelManager not available")
+            return
+
+        # 格式化推送消息
+        icon = "✅" if status == "success" else "❌"
+        message = (
+            f"{icon} **定时任务完成**: {job.get('name', 'unnamed')}\n\n"
+            f"{(result or '')[:1500]}"
+        )
+
+        sent = await self._channel_manager.send(source_type, chat_id, message)
+        if sent:
+            logger.info(f"[Cron] Result delivered to {source_type}:{chat_id} for job {job['id']}")
+        else:
+            logger.warning(
+                f"[Cron] Failed to deliver to {source_type}:{chat_id} for job {job['id']}. "
+                f"Result still available via notification_bus."
+            )
 
     def _build_cron_prompt(self, job: dict, cron_memory=None) -> str:
         """构建 cron 专用 system prompt（自包含，不嵌套 system.md）"""

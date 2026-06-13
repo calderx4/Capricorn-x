@@ -1,6 +1,6 @@
 [project]
 name = "capricorn-v"
-version = "0.2.11"
+version = "0.2.12"
 description = "原生 Function Calling 驱动的轻量级通用 Agent Runtime — 垂直领域一键扩展"
 readme = "README.md"
 license = {text = "MIT"}

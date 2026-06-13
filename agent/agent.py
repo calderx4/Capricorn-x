@@ -73,7 +73,8 @@ class CapricornGraph:
     async def run(self, user_input: str, thread_id: str = "default",
                   notifications: str = "", images: list = None,
                   attachments: list = None,
-                  on_event: EventCallback = None) -> str:
+                  on_event: EventCallback = None,
+                  extra_system_prompt: str = "") -> str:
         """运行 FC 循环"""
         logger.info(f"Running agent with thread_id: {thread_id}")
 
@@ -82,6 +83,8 @@ class CapricornGraph:
         system_prompt = self._build_system_prompt()
         if notifications:
             system_prompt += f"\n\n{notifications}"
+        if extra_system_prompt:
+            system_prompt += f"\n\n{extra_system_prompt}"
         history_messages = session.get_history()
 
         # 构建 prompt 文本（附加文件信息）
@@ -157,20 +160,7 @@ class CapricornGraph:
                 await safe_emit(on_event, "thinking", {"round": i + 1})
 
                 try:
-                    for retry in range(3):
-                        try:
-                            response = await self._llm_with_tools.ainvoke(messages)
-                            break
-                        except Exception as invoke_err:
-                            err_str = str(invoke_err)
-                            if "429" in err_str or "rate" in err_str.lower():
-                                wait = 3 * (2 ** retry)  # 3s, 6s, 12s
-                                logger.warning(f"Rate limited, retrying in {wait}s... (attempt {retry + 1}/3)")
-                                await asyncio.sleep(wait)
-                            else:
-                                raise
-                    else:
-                        raise RuntimeError("Max retries exceeded for rate limit")
+                    response = await self._invoke_with_retry(messages)
                 except RuntimeError:
                     raise
                 messages.append(response)
@@ -266,6 +256,20 @@ class CapricornGraph:
                 "tools_used": tools_used,
             })
             return error_msg
+
+    async def _invoke_with_retry(self, messages):
+        """调用 LLM，遇 429 限流自动重试（最多 3 次，指数退避）。"""
+        for retry in range(3):
+            try:
+                return await self._llm_with_tools.ainvoke(messages)
+            except Exception as e:
+                if "429" in str(e) or "rate" in str(e).lower():
+                    wait = 3 * (2 ** retry)  # 3s, 6s, 12s
+                    logger.warning(f"Rate limited, retrying in {wait}s... (attempt {retry + 1}/3)")
+                    await asyncio.sleep(wait)
+                else:
+                    raise
+        raise RuntimeError("Max retries exceeded for rate limit")
 
     def _summarize_tool_args(self, args: dict, max_len: int = 200) -> str:
         """生成工具参数摘要（截断 + 单行化）"""

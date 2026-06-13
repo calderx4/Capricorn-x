@@ -17,8 +17,6 @@ def build_prompt(template_path: str, **sections: str) -> str:
     if not p.exists():
         raise FileNotFoundError(f"Prompt template not found: {template_path}")
     template = p.read_text("utf-8")
-    # 先转义用户内容中的 {{ }}，防止被当作模板变量
-    placeholders = set(sections.keys())
     safe_sections = {}
     for name, content in sections.items():
         if name in ("workspace_section", "memory_section", "agent_md_section",

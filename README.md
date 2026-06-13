@@ -1,6 +1,6 @@
 # Capricorn-x
 
-> v0.2.11 | 原生 Function Calling 驱动的轻量级通用 Agent Runtime
+> v0.2.12 | 原生 Function Calling 驱动的轻量级通用 Agent Runtime
 
 轻量级 Agent Runtime。不约束 LLM 怎么做，只告诉它有什么能用，让它自己规划和决策。
 
@@ -40,7 +40,7 @@ LLM 越强，Capricorn 越薄。不硬编码业务规则，不规定步骤数，
 ## 架构
 
 ```
-用户（CLI / WebUI / HTTP API）
+用户（CLI / WebUI / HTTP API / 飞书）
   │
   ▼
 Gateway（aiohttp, Auth, SSE）
@@ -50,6 +50,9 @@ Gateway（aiohttp, Auth, SSE）
   ├── POST /chat/stream  — SSE 流式对话（实时推送 FC 循环进度）
   │
   ▼
+Channel Manager（飞书 / 微信 / QQ / Telegram ...）
+  │
+  ▼
 Capricorn Agent
   │
   ├── FC 循环      — LLM → tool_calls → execute → repeat
@@ -57,7 +60,7 @@ Capricorn Agent
   ├── 多模态       — 图片通过 base64 注入 LLM 原生视觉
   ├── 三层工具      — builtin / MCP / workflow，自动发现
   ├── Agent Teams   — spawn executor / verifier，LLM 自己决定是否需要
-  ├── Cron          — 定时任务，支持角色配置
+  ├── Cron          — 定时任务，支持角色配置，结果推回来源 Channel
   ├── 三层记忆      — session / MEMORY.md / HISTORY.md
   ├── BIA 自进化    — 行为规则去重、压缩、上限管理
   └── Tasklist      — 任务列表管理，SSE 实时同步
@@ -127,7 +130,9 @@ FC 循环的每一步都通过事件系统实时推送：
 | 文件上传 | WebUI 上传文件 → 自动保存到 workspace，Agent 用工具读取 |
 | 三层工具 | builtin / MCP / workflow，自动发现注册 |
 | Agent Teams | spawn executor / verifier，LLM 自主决策 |
-| Cron | 定时调度，支持角色配置，SSE 推送结果 |
+| Cron | 定时调度，支持角色配置，结果推回来源 Channel |
+| Channel | 飞书（WebSocket 长连接 + 图片/表情），可扩展微信/QQ/Telegram |
+| Channel Prompt | 按平台自动注入专属指令（格式约束、风格规范） |
 | 三层记忆 | session + MEMORY.md + HISTORY.md，自动整合 |
 | BIA 自进化 | 行为规则管理（去重、压缩、上限） |
 | 技能系统 | autoload + on-demand，按需加载领域技能 |
@@ -174,6 +179,7 @@ pytest tests/ -q
 
 | 版本 | 主题 |
 |------|------|
+| v0.2.12 | 飞书 Channel（WebSocket 长连接 + 图片/表情接收 + Channel Prompt）+ Cron 源路由（结果推回来源 Channel）+ Config 清理 |
 | v0.2.11 | SSE 断连后台执行 + 进度持久化 + sandbox 统一 + config 简化 |
 | v0.2.10 | glob/grep 搜索工具 + read_file offset/limit + 代码简化清理 |
 | v0.2.9 | SSE 流式事件 + Tasklist 工具 + 指数退避重试 |

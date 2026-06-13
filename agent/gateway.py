@@ -31,7 +31,7 @@ from aiohttp import web
 from loguru import logger
 
 from core.utils import atomic_write
-from agent.events import QueueEventSink
+from agent.events import QueueEventSink, format_progress_line
 
 MAX_PROMPT_LENGTH = 50000
 MAX_CONCURRENT_TASKS = 20
@@ -196,6 +196,7 @@ class Gateway:
                 response = await self.agent.chat(
                     prompt, thread_id=thread_id,
                     images=images, attachments=attachments,
+                    source={"type": "gateway"},
                 )
             return web.json_response({"response": response})
         except Exception as e:
@@ -248,6 +249,7 @@ class Gateway:
                         prompt, thread_id=thread_id,
                         images=images, attachments=attachments,
                         on_event=_on_event,
+                        source={"type": "gateway"},
                     )
             except asyncio.CancelledError:
                 logger.debug("SSE /chat/stream agent task cancelled")
@@ -613,39 +615,7 @@ class Gateway:
     @staticmethod
     def _append_progress(progress: list, event_type: str, event_data: dict):
         """将 SSE 事件格式化为进度行并追加到列表"""
-        line = None
-        if event_type == "thinking":
-            line = f"🧠 思考中... (第 {event_data.get('round', '?')} 轮)"
-        elif event_type == "tool_call_start":
-            name = event_data.get("tool_name", "?")
-            args = event_data.get("tool_args_preview", "")
-            line = f"🔧 {name}({args})" if args else f"🔧 {name}(...)"
-        elif event_type == "tool_call_end":
-            name = event_data.get("tool_name", "?")
-            latency = event_data.get("latency_ms", 0)
-            status = event_data.get("status", "ok")
-            icon = "✅" if status == "ok" else ("⏱️" if status == "timeout" else "❌")
-            line = f"{icon} {name} 完成 ({latency}ms)"
-        elif event_type == "round_end":
-            round_n = event_data.get("round", "?")
-            tc = event_data.get("tool_count", 0)
-            line = f"📊 第 {round_n} 轮完成 ({tc} 个工具)"
-        elif event_type == "consolidation_start":
-            triggered_by = event_data.get("triggered_by", "")
-            msg_count = event_data.get("message_count", 0)
-            line = f"🗜️ 记忆压缩中... ({triggered_by}, {msg_count} 条消息)"
-        elif event_type == "consolidation_end":
-            success = event_data.get("success", True)
-            icon = "✅" if success else "❌"
-            line = f"{icon} 记忆压缩{'完成' if success else '失败'}"
-        elif event_type == "tasklist_update":
-            items = event_data.get("items", [])
-            if items:
-                tl = []
-                for item in items:
-                    ic = {"pending": "⬜", "in_progress": "🔄", "completed": "✅"}.get(item.get("status"), "⬜")
-                    tl.append(f"{ic} {item.get('activeForm') or item.get('content', '')}")
-                line = "📋 " + " | ".join(tl)
+        line = format_progress_line(event_type, event_data)
         if line is not None:
             progress.append(line)
             # 上限保护：超过 500 行时截断旧数据
@@ -669,7 +639,8 @@ class Gateway:
 
         try:
             result = await asyncio.wait_for(
-                self.agent.chat(prompt, thread_id=f"task_{task_id}"),
+                self.agent.chat(prompt, thread_id=f"task_{task_id}",
+                                source={"type": "gateway"}),
                 timeout=timeout,
             )
             task_data["status"] = "done"

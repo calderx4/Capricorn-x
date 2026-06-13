@@ -32,6 +32,55 @@ async def safe_emit(on_event: EventCallback, event_type: str, data: dict):
             logger.debug(f"Event emission failed: {e}")
 
 
+# ── 进度格式化（Gateway._append_progress 和 PrintEventSink 共用） ──────
+
+_STATUS_ICONS = {"pending": "⬜", "in_progress": "🔄", "completed": "✅"}
+
+
+def format_progress_line(event_type: str, data: dict) -> str | None:
+    """将事件格式化为进度行。返回 None 表示该事件不产生进度行。"""
+    if event_type == "thinking":
+        return f"🧠 思考中... (第 {data.get('round', '?')} 轮)"
+
+    if event_type == "tool_call_start":
+        name = data.get("tool_name", "?")
+        args = data.get("tool_args_preview", "")
+        return f"🔧 {name}({args})" if args else f"🔧 {name}(...)"
+
+    if event_type == "tool_call_end":
+        name = data.get("tool_name", "?")
+        latency = data.get("latency_ms", 0)
+        status = data.get("status", "ok")
+        icon = "✅" if status == "ok" else ("⏱️" if status == "timeout" else "❌")
+        return f"{icon} {name} 完成 ({latency}ms)"
+
+    if event_type == "round_end":
+        round_n = data.get("round", "?")
+        tc = data.get("tool_count", 0)
+        return f"📊 第 {round_n} 轮完成 ({tc} 个工具)"
+
+    if event_type == "consolidation_start":
+        triggered_by = data.get("triggered_by", "")
+        msg_count = data.get("message_count", 0)
+        return f"🗜️ 记忆压缩中... ({triggered_by}, {msg_count} 条消息)"
+
+    if event_type == "consolidation_end":
+        success = data.get("success", True)
+        icon = "✅" if success else "❌"
+        return f"{icon} 记忆压缩{'完成' if success else '失败'}"
+
+    if event_type == "tasklist_update":
+        items = data.get("items", [])
+        if items:
+            tl = []
+            for item in items:
+                ic = _STATUS_ICONS.get(item.get("status"), "⬜")
+                tl.append(f"{ic} {item.get('activeForm') or item.get('content', '')}")
+            return "📋 " + " | ".join(tl)
+
+    return None
+
+
 class QueueEventSink:
     """将事件推入 asyncio.Queue，供 SSE 端点消费"""
 
@@ -56,48 +105,27 @@ class PrintEventSink:
 
     async def emit(self, event_type: str, data: dict):
         """发出一个事件，同步 print"""
-        if event_type == "thinking":
-            round_n = data.get("round", "?")
-            print(f"  🧠 思考中... (第 {round_n} 轮)")
+        line = format_progress_line(event_type, data)
 
-        elif event_type == "tool_call_start":
-            name = data.get("tool_name", "?")
-            args_preview = data.get("tool_args_preview", "")
-            if args_preview:
-                print(f"  🔧 {name}({args_preview})")
-            else:
-                print(f"  🔧 {name}(...)")
+        if line is not None:
+            print(f"  {line}")
+            return
 
-        elif event_type == "tool_call_end":
-            name = data.get("tool_name", "?")
-            latency = data.get("latency_ms", 0)
-            status = data.get("status", "ok")
-            icon = "✅" if status == "ok" else ("⏱️" if status == "timeout" else "❌")
-            print(f"  {icon} {name} 完成 ({latency}ms)")
-
-        elif event_type == "round_end":
+        # round_end 在 CLI 中额外显示延迟
+        if event_type == "round_end":
             round_n = data.get("round", "?")
             tool_count = data.get("tool_count", 0)
             latency = data.get("latency_ms", 0)
             if tool_count > 0:
                 print(f"  📊 第 {round_n} 轮完成: {tool_count} 个工具, {latency}ms")
 
-        elif event_type == "consolidation_start":
-            triggered_by = data.get("triggered_by", "")
-            msg_count = data.get("message_count", 0)
-            print(f"  🗜️ 记忆压缩中... (触发: {triggered_by}, {msg_count} 条消息)")
-
-        elif event_type == "consolidation_end":
-            success = data.get("success", True)
-            icon = "✅" if success else "❌"
-            print(f"  {icon} 记忆压缩{'完成' if success else '失败'}")
-
-        elif event_type == "tasklist_update":
+        # tasklist_update 在 CLI 中用多行展示
+        if event_type == "tasklist_update":
             items = data.get("items", [])
             if items:
                 print("  📋 任务进度：")
                 for item in items:
-                    icon = {"pending": "⬜", "in_progress": "🔄", "completed": "✅"}.get(item.get("status"), "⬜")
+                    icon = _STATUS_ICONS.get(item.get("status"), "⬜")
                     label = item.get("activeForm") or item.get("content", "")
                     print(f"    {icon} {label}")
 
