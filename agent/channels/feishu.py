@@ -138,7 +138,7 @@ class FeishuChannel(BaseChannel):
     name = "feishu"
     display_name = "飞书"
 
-    def __init__(self, config: Any, agent: "CapricornAgent"):
+    def __init__(self, config: Any, agent):
         super().__init__(config, agent)
         self.config = config
         self._client: Any = None          # lark.Client（发消息用）
@@ -169,13 +169,24 @@ class FeishuChannel(BaseChannel):
             lark.Client.builder()
             .app_id(app_id)
             .app_secret(app_secret)
-            .log_level(lark.LogLevel.INFO)
+            .log_level(lark.LogLevel.WARNING)  # 静默 SDK INFO 日志（默认会打印含 access_key/ticket 的 wss URL）
             .build()
         )
 
         # 准备配置参数（传给子线程）
         encrypt_key = getattr(self.config, "encrypt_key", "") or ""
         verification_token = getattr(self.config, "verification_token", "") or ""
+
+        # 说明：这两个字段在 HTTP webhook 模式下用于验签/解密，但本项目走
+        # WebSocket 长连接——SDK 在 WSS 模式下调 _do_without_validation()
+        # （lark_oapi/event/dispatcher_handler.py），不执行 do() 里的
+        # _decrypt / token 校验 / _verify_sign，所以这两个字段配了也不会被读取。
+        # WSS 连接本身已由飞书服务端用 app_secret 握手鉴权（事件无法伪造），
+        # 但“是哪个用户发的”SDK 不校验——这一层完全靠 allow_from 兜底。
+        # 因此真实风险只在 allow_from=["*"]，启动摘要里会单独告警，不再误导
+        # 用户去补两个永远不生效的验签字段。
+        allow_from = getattr(self.config, "allow_from", [])
+        allow_all = allow_from == ["*"]
 
         # ── 子线程：创建 WebSocket 客户端并运行 ──
         # 根因修复：lark-oapi SDK 的 ws/client.py 在模块级用
@@ -206,7 +217,7 @@ class FeishuChannel(BaseChannel):
                     app_id,
                     app_secret,
                     event_handler=event_handler,
-                    log_level=lark.LogLevel.INFO,
+                    log_level=lark.LogLevel.WARNING,  # 同上，避免 wss 连接 URL（含凭证）落到终端
                 )
                 self._ws_client = ws_client
 
@@ -225,7 +236,28 @@ class FeishuChannel(BaseChannel):
         self._ws_thread = threading.Thread(target=_run_ws, daemon=True)
         self._ws_thread.start()
 
+        # ── 启动摘要 ──
+        # 等宽终端下 CJK 字符占 2 列，按显示宽度对齐「—」
+        app_id_short = f"{app_id[:6]}...{app_id[-4:]}" if len(app_id) > 12 else app_id
+        if allow_all:
+            allow_desc = '全部放开 ["*"]'
+        elif allow_from:
+            allow_desc = f"{len(allow_from)} 个 open_id 白名单"
+        else:
+            allow_desc = "空（将拒绝所有消息）"
+
         logger.info("[Feishu] ✅ 已启动 (WebSocket 长连接，无需公网 IP)")
+        logger.info(f"[Feishu]   · App ID   — {app_id_short}")
+        logger.info("[Feishu]   · 事件订阅 — im.message.receive_v1 (+reaction/read)")
+        logger.info(f"[Feishu]   · 白名单   — {allow_desc}")
+        logger.info("[Feishu]   · 图片支持 — 已启用 (自动下载/解析)")
+
+        if allow_all:
+            logger.warning(
+                "[Feishu] ⚠ 白名单全开：WebSocket 模式下 SDK 不校验发送者身份，"
+                "任何能加到本 bot 的飞书用户都可驱动 agent 执行工具。"
+                "本地自测可接受；公开/多用户部署前请改为显式 open_id 白名单。"
+            )
 
         # 保持运行直到 stop()
         while not self._stop_event.is_set():

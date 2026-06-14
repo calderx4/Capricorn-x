@@ -14,20 +14,9 @@ SpawnTool = _mod.SpawnTool
 SpawnConfig = _mod.SpawnConfig
 
 
-def _make_mock_tool(name):
-    t = MagicMock()
-    t.name = name
-    return t
-
-
 def _make_spawn_tool(tmp_path, roles=None):
     mock_registry = MagicMock()
-    mock_registry.get_langchain_tools.return_value = [
-        _make_mock_tool("read_file"),
-        _make_mock_tool("write_file"),
-        _make_mock_tool("exec"),
-        _make_mock_tool("list_files"),
-    ]
+    mock_registry.tools.list_tools.return_value = ["read_file", "write_file", "exec", "list_files"]
     if roles is None:
         executor_template = tmp_path / "executor.md"
         executor_template.write_text("# Executor\n{{task_prompt}}\n{{workspace_section}}")

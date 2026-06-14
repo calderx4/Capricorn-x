@@ -12,7 +12,6 @@ import json
 import uuid
 from collections import deque
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import List
 
 from core.paths import GATEWAY_DIR

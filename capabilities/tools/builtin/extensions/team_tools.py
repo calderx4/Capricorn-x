@@ -25,19 +25,24 @@ _TASK_ID_RE = re.compile(r'^task_[a-f0-9]{8}$')
 _task_lock = threading.Lock()
 
 # Task status constants
+#
+# 设计说明：spawn 路径的状态机是 producing → running → done | need_decision | error。
+# 历史上曾设计了 verifying/failed 两态 + max_attempts 自动 force-done 的「自动验收-重试
+# 闭环」，但该闭环从未在代码层实现——verifier 的验收结论写在 result.md 自由文本里，系统
+# 不解析，因此无法自动判定 pass/rejected、无法自动 re-spawn。「验收不通过 → 带 feedback 重跑」
+# 完全由 LLM 手动驱动（主 Agent 读 get_result 文本后自行决定是否再 spawn + 填 retry_feedback）。
+# 故移除 verifying/failed 及依赖它们的 force-done 逻辑，避免代码声称一个并不存在的保证。
+# attempts / max_attempts / retry_feedback 字段保留在 task schema 中供 LLM 手动驱动参考，
+# 但系统不再据此强制任何自动行为。
 STATUS_PRODUCING = "producing"
 STATUS_RUNNING = "running"
-STATUS_VERIFYING = "verifying"
 STATUS_DONE = "done"
-STATUS_FAILED = "failed"
 STATUS_NEED_DECISION = "need_decision"
 STATUS_ERROR = "error"
 
 VALID_TRANSITIONS = {
     STATUS_PRODUCING: [STATUS_RUNNING],
-    STATUS_RUNNING: [STATUS_DONE, STATUS_NEED_DECISION, STATUS_ERROR, STATUS_VERIFYING],
-    STATUS_VERIFYING: [STATUS_DONE, STATUS_FAILED, STATUS_NEED_DECISION],
-    STATUS_FAILED: [STATUS_PRODUCING, STATUS_RUNNING],
+    STATUS_RUNNING: [STATUS_DONE, STATUS_NEED_DECISION, STATUS_ERROR],
     STATUS_NEED_DECISION: [STATUS_RUNNING, STATUS_PRODUCING],
     STATUS_DONE: [],
     STATUS_ERROR: [STATUS_PRODUCING, STATUS_RUNNING],
@@ -72,13 +77,8 @@ def _transition_task(workspace_root: Path, task_id: str, new_status: str, extra:
         task["status"] = new_status
         task["updated_at"] = _now_ts()
 
-        if new_status in (STATUS_VERIFYING, STATUS_RUNNING):
+        if new_status == STATUS_RUNNING:
             task["attempts"] += 1
-
-        if new_status == STATUS_FAILED and task["attempts"] >= task["max_attempts"]:
-            task["status"] = STATUS_DONE
-            task["quality_warning"] = True
-            logger.warning(f"Task {task_id} reached max_attempts, force-done")
 
         if extra:
             task.update(extra)
@@ -97,7 +97,7 @@ class TaskManageTool(BaseTool):
     name = "task"
     description = (
         "管理团队任务状态机：创建、查询、更新任务状态。"
-        f"状态值：{STATUS_PRODUCING} → {STATUS_RUNNING} → {STATUS_DONE} / {STATUS_NEED_DECISION} / {STATUS_ERROR} / {STATUS_FAILED}"
+        f"状态值：{STATUS_PRODUCING} → {STATUS_RUNNING} → {STATUS_DONE} / {STATUS_NEED_DECISION} / {STATUS_ERROR}"
     )
     auto_discover = False
 
@@ -125,7 +125,7 @@ class TaskManageTool(BaseTool):
                 },
                 "status": {
                     "type": "string",
-                    "enum": [STATUS_PRODUCING, STATUS_RUNNING, STATUS_VERIFYING, STATUS_DONE, STATUS_FAILED, STATUS_NEED_DECISION, STATUS_ERROR],
+                    "enum": [STATUS_PRODUCING, STATUS_RUNNING, STATUS_DONE, STATUS_NEED_DECISION, STATUS_ERROR],
                     "description": "目标状态（update 时必填）",
                 },
                 "assigned_role": {
@@ -292,6 +292,8 @@ class SpawnTool(BaseTool):
         "召唤 SubAgent 执行子任务。立即返回 task_id，不等待完成。"
         "role=executor 执行任务，role=verifier 验收质量。"
         "用 check_status 查询状态，get_result 获取结果。"
+        "注意：系统不自动验收也不自动重试——verifier 结论在 result 文本里，"
+        "若需重跑，由你读结论后再次 spawn，并在 retry_feedback 填上次反馈。"
     )
     auto_discover = False
 
@@ -494,7 +496,7 @@ class SpawnTool(BaseTool):
                 logger.error(f"Failed to transition {task_id} to error state")
 
     def _compute_excluded_tools(self, role: dict) -> list:
-        all_tools = [t.name for t in self._capability_registry.get_langchain_tools()]
+        all_tools = self._capability_registry.tools.list_tools()
         return compute_excluded_tools(all_tools, role.get("tools"), MUST_EXCLUDE_TOOLS)
 
 
@@ -531,7 +533,10 @@ class CheckStatusTool(BaseTool):
         if not task_json_path.exists():
             return json.dumps({"error": f"任务 {task_id} 不存在"}, ensure_ascii=False)
 
-        task = json.loads(task_json_path.read_text(encoding="utf-8"))
+        try:
+            task = json.loads(task_json_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return json.dumps({"error": f"任务 {task_id} 数据损坏"}, ensure_ascii=False)
         return json.dumps({
             "task_id": task["id"],
             "status": task["status"],

@@ -27,7 +27,6 @@ from core.prompt_utils import (
     build_bia_section, build_prompt, read_agent_md, build_simple_workspace_section,
 )
 from core.utils import atomic_write, short_id, compute_excluded_tools
-from core import trace
 from core.consolidation import consolidate_if_needed
 
 
@@ -525,7 +524,7 @@ class CronScheduler:
         if role_tools == "all" or not role_tools:
             return ["cron", "spawn"]
 
-        all_tools = [t.name for t in self._capability_registry.get_langchain_tools()]
+        all_tools = self._capability_registry.tools.list_tools()
         return compute_excluded_tools(all_tools, role_tools, ("cron", "spawn"))
 
     # ── 状态管理 ──────────────────────────────────────

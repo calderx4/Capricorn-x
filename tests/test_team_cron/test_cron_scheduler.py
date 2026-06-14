@@ -388,12 +388,8 @@ class TestComputeExcludeTools:
 
     def test_role_with_whitelist(self, tmp_path):
         s = _make_scheduler(tmp_path)
-        mock_tools = [MagicMock(name="read_file"), MagicMock(name="write_file"), MagicMock(name="exec")]
-        mock_tools[0].name = "read_file"
-        mock_tools[1].name = "write_file"
-        mock_tools[2].name = "exec"
         s._capability_registry = MagicMock()
-        s._capability_registry.get_langchain_tools.return_value = mock_tools
+        s._capability_registry.tools.list_tools.return_value = ["read_file", "write_file", "exec"]
         s._roles = {"verifier": {"tools": ["read_file"]}}
         excluded = s._compute_exclude_tools("verifier")
         assert "read_file" not in excluded

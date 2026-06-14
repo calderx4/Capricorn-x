@@ -4,10 +4,11 @@ Session Manager - 会话管理
 职责：
 - 管理会话状态
 - JSONL 格式存储（一行一条消息）
-- 记忆整合由 hooks/auto_memory_consolidation.py 异步处理
+- 记忆整合由 core/consolidation.py 在 agent.chat() 前触发
 """
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
@@ -36,7 +37,8 @@ class Session:
     messages: List[Dict[str, Any]] = field(default_factory=list)
 
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
-        self.messages.append({"role": role, "content": content, **kwargs})
+        self.messages.append({"role": role, "content": content,
+                              "timestamp": datetime.now().isoformat(), **kwargs})
 
     def get_history(self) -> List[Dict[str, Any]]:
         return list(self.messages)

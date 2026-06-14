@@ -21,8 +21,8 @@ from memory.session import SessionManager
 from memory.long_term import LongTermMemory
 from memory.history import HistoryLog
 from core.paths import (
-    PROMPTS_DIR, ROLES_DIR, BUILTIN_EXTENSIONS,
-    WORKFLOW_EXTENSIONS, CONFIG_DIR,
+    PROMPTS_DIR, ROLES_DIR,
+    BUILTIN_EXTENSIONS, WORKFLOW_EXTENSIONS,
 )
 from core.consolidation import consolidate_if_needed
 
@@ -88,7 +88,6 @@ class CapricornAgent:
         self.history_log: Optional[HistoryLog] = None
         self._cron_scheduler = None
         self._notification_bus = None
-        self._system_prompt_path: Optional[str] = None
         self._bia_path: Optional[str] = None
         self._roles: dict = {}
         self._team_config: dict = {}
@@ -120,6 +119,7 @@ class CapricornAgent:
             sandbox=self.config.workspace.sandbox,
             skill_manager=self.skill_manager,
             blocked_commands=self.config.blocked_commands,
+            allowed_commands=self.config.allowed_commands,
         )
 
         # 4. 加载角色系统
@@ -191,7 +191,7 @@ class CapricornAgent:
                 logger.info(f"Team tools registered (roles: {list(self._roles.keys())})")
 
                 # 校验角色白名单工具是否都已注册
-                registered = {t.name for t in self.capability_registry.get_langchain_tools()}
+                registered = set(self.capability_registry.tools.list_tools())
                 for role_name, role_def in self._roles.items():
                     role_tools = role_def.get("tools")
                     if role_tools and role_tools != "all":
@@ -234,7 +234,6 @@ class CapricornAgent:
 
         # 11. 构建图
         system_prompt_path = str(PROMPTS_DIR / "system.md")
-        self._system_prompt_path = system_prompt_path
 
         self.graph = CapricornGraph(
             self.capability_registry,

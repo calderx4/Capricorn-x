@@ -33,10 +33,6 @@ class MemoryConsolidationWorkflow(BaseWorkflow):
     def description(self) -> str:
         return "Consolidate session messages into long-term memory and history log."
 
-    @property
-    def required_tools(self) -> List[str]:
-        return []
-
     def __init__(self, long_term_memory: LongTermMemory, history_log: HistoryLog,
                  llm_client, config: Dict = None):
         self.long_term_memory = long_term_memory

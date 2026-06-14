@@ -115,6 +115,9 @@ class FeishuConfig(BaseModel):
     enabled: bool = False
     app_id: str = ""
     app_secret: str = ""
+    # 事件验签：为空时无法校验事件来源，存在伪造风险（见 FeishuChannel.start 的告警）
+    encrypt_key: str = ""
+    verification_token: str = ""
     allow_from: list[str] = Field(default_factory=lambda: ["*"])
 
 
@@ -134,6 +137,9 @@ class Config(BaseModel):
     skills: Dict[str, Any] = Field(default_factory=dict)
     agent: Dict[str, Any] = Field(default_factory=dict)
     blocked_commands: list[str] = Field(default_factory=list)
+    # 可选：exec 命令白名单。非空时只有列出的程序名可执行（argv[0] 匹配）。
+    # 公开部署（飞书/gateway 对外）时强烈建议配置，黑名单易被绕过。
+    allowed_commands: list[str] = Field(default_factory=list)
     cron: CronConfig = Field(default_factory=CronConfig)
     team: TeamConfig = Field(default_factory=TeamConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)

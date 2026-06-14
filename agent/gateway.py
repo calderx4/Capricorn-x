@@ -35,9 +35,16 @@ from agent.events import QueueEventSink, format_progress_line
 
 MAX_PROMPT_LENGTH = 50000
 MAX_CONCURRENT_TASKS = 20
+MAX_CONCURRENT_AGENT_RUNS = 20  # /chat + /chat/stream 共享的并发 agent 上限（防 LLM 成本滥用）
 MAX_TASK_TIMEOUT = 3600  # 单个异步任务最长 1 小时
 MAX_SSE_CLIENTS = 50
-MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 单文件上传上限 50MB
+# 整个请求体上限（aiohttp client_max_size，含 multipart 多文件 + 协议开销）。
+CLIENT_MAX_SIZE = 50 * 1024 * 1024
+# 单个上传文件上限（per-file）。必须严格 < CLIENT_MAX_SIZE，否则 aiohttp 会先
+# 在请求体层截断，下面的流式 per-file 检查永远触发不了（曾经的死代码 bug）。
+MAX_UPLOAD_SIZE = 30 * 1024 * 1024
+# 视为本地回环的 host：这些地址上不强制要求 GATEWAY_API_KEY
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 TASK_ID_RE = re.compile(r'^[0-9a-f]{8}$')
 
 
@@ -78,16 +85,35 @@ class Gateway:
         self._background_tasks: set = set()  # 客户端断连后继续在后台运行的 agent 任务
         self._active_threads: Dict[str, asyncio.Task] = {}  # thread_id → 正在运行的 agent task
         self._thread_progress: Dict[str, list] = {}  # thread_id → 格式化的进度行（断连后仍可查询）
+        self._active_agent_runs = 0  # 当前并发 agent 运行数（/chat + /chat/stream 共享上限）
         self._api_key = os.environ.get("GATEWAY_API_KEY", "")
         self._default_task_timeout = config.gateway.task_timeout
 
+    def _acquire_agent_run_slot(self) -> bool:
+        """占用一个并发 agent 运行名额；成功返回 True，已满返回 False。"""
+        if self._active_agent_runs >= MAX_CONCURRENT_AGENT_RUNS:
+            return False
+        self._active_agent_runs += 1
+        return True
+
+    def _release_agent_run_slot(self) -> None:
+        if self._active_agent_runs > 0:
+            self._active_agent_runs -= 1
+
     async def start(self):
         """启动 HTTP 服务"""
+        # 非 localhost 绑定必须设置 GATEWAY_API_KEY，否则所有端点裸奔（fail-secure）
+        if self.host not in _LOOPBACK_HOSTS and not self._api_key:
+            raise RuntimeError(
+                f"Gateway 绑定到 {self.host}（非回环地址）但未设置 GATEWAY_API_KEY —— "
+                "拒绝启动。请设置 GATEWAY_API_KEY 环境变量，或绑定到 127.0.0.1。"
+            )
+
         middlewares = [security_headers_middleware]
         if self._api_key:
             middlewares.append(self._make_auth_middleware())
 
-        app = web.Application(middlewares=middlewares, client_max_size=30 * 1024 * 1024)
+        app = web.Application(middlewares=middlewares, client_max_size=CLIENT_MAX_SIZE)
         app.add_routes([
             web.post("/chat", self._handle_chat),
             web.post("/chat/stream", self._handle_chat_stream),
@@ -111,7 +137,11 @@ class Gateway:
         await site.start()
         logger.info(f"Gateway started on {self.host}:{self.port}" + (" (with WebUI)" if self.webui else ""))
         if not self._api_key:
-            logger.warning("⚠ GATEWAY_API_KEY not set — authentication disabled. All endpoints are open.")
+            logger.warning(
+                "[Gateway] ⚠ GATEWAY_API_KEY 未设置 —— 所有 HTTP 端点无认证。"
+                f"当前绑定 {self.host}（仅本机可访问），本地自测可接受；"
+                "公网/多用户部署前请设置 GATEWAY_API_KEY 环境变量启用认证。"
+            )
         if self._api_key:
             logger.info("Gateway authentication enabled")
 
@@ -190,6 +220,8 @@ class Gateway:
         if err:
             return err
 
+        if not self._acquire_agent_run_slot():
+            return web.json_response({"error": "Too many concurrent agent runs"}, status=429)
         try:
             lock = self._get_thread_lock(thread_id)
             async with lock:
@@ -202,6 +234,8 @@ class Gateway:
         except Exception as e:
             logger.error(f"/chat error: {e}")
             return web.json_response({"error": "Internal server error"}, status=500)
+        finally:
+            self._release_agent_run_slot()
 
     async def _handle_chat_stream(self, request: web.Request) -> web.StreamResponse:
         """POST /chat/stream — SSE 流式返回 FC 循环执行步骤"""
@@ -259,6 +293,14 @@ class Gateway:
                 await sink.emit("error", {"error": "Internal server error"})
             finally:
                 sink.mark_done()
+                self._release_agent_run_slot()
+
+        # 并发上限检查：满了直接拒绝，不创建 agent task
+        if not self._acquire_agent_run_slot():
+            error_data = json.dumps({"error": "Too many concurrent agent runs"}, ensure_ascii=False)
+            await _sse_write(resp, f"event: error\ndata: {error_data}\n\n".encode("utf-8"))
+            await _sse_write(resp, b"event: done\ndata: {}\n\n")
+            return resp
 
         try:
             # 启动 agent task
@@ -338,15 +380,49 @@ class Gateway:
                 break
             if not part.name or not part.filename:
                 continue
-            data = await part.read(decode=True)
-            if len(data) > MAX_UPLOAD_SIZE:
-                logger.warning(f"Upload skipped (too large): {part.filename} ({len(data)} bytes)")
+            # 流式读取并累加：超限即放弃这个 part，避免一次性把整个文件读进内存
+            chunks = []
+            total = 0
+            too_large = False
+            try:
+                while not part.at_eof():
+                    chunk = await part.read_chunk()
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_UPLOAD_SIZE:
+                        too_large = True
+                        break
+                    chunks.append(chunk)
+            except Exception as e:
+                # 单个 part 读取异常（边界损坏 / 客户端断连）：跳过该 part，不毁掉整批上传
+                logger.warning(f"Upload part {part.filename!r} read error: {e}")
+                continue
+            if too_large:
+                # 排空该 part 残余数据，保持 multipart 解析状态干净
+                try:
+                    while not part.at_eof():
+                        if not await part.read_chunk():
+                            break
+                except Exception:
+                    pass
+                logger.warning(f"Upload skipped (too large): {part.filename} (>{MAX_UPLOAD_SIZE} bytes)")
                 results.append({
                     "filename": part.filename,
                     "status": "skipped",
-                    "error": f"File too large ({len(data)} bytes, max {MAX_UPLOAD_SIZE})",
+                    "error": f"File too large (max {MAX_UPLOAD_SIZE} bytes)",
                 })
                 continue
+            data = b"".join(chunks)
+            # 兼容 RFC 2388 Content-Transfer-Encoding（旧 curl -F 等客户端可能用 base64 编码 part，
+            # read_chunk 不自动解码——补偿原 part.read(decode=True) 的语义）
+            cte = part.headers.get("Content-Transfer-Encoding", "").lower()
+            if cte == "base64":
+                try:
+                    data = base64.b64decode(data, validate=False)
+                except Exception as e:
+                    logger.warning(f"Upload {part.filename!r} base64 decode failed: {e}")
+                    continue
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             raw_name = Path(part.filename).name  # 去掉路径组件
             rand_suffix = uuid.uuid4().hex[:4]

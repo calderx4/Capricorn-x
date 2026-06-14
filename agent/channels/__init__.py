@@ -31,7 +31,6 @@ class BaseChannel(ABC):
     - start()：启动连接，开始监听消息
     - stop()：停止连接，清理资源
     - send()：发送消息到平台
-    - login()：交互式登录（可选，如微信扫码）
 
     消息流转：
         平台消息 → _on_message() → _dispatch() → agent.chat() → _send_response()
@@ -68,10 +67,6 @@ class BaseChannel(ABC):
             content: 消息文本内容
         """
         ...
-
-    async def login(self, force: bool = False) -> bool:
-        """交互式登录（如扫码）。默认无需登录。"""
-        return True
 
     @property
     def is_running(self) -> bool:

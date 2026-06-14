@@ -2,7 +2,6 @@
 Tool Registry - 工具注册和执行
 """
 
-import asyncio
 import json
 from typing import Dict, List, Any, Optional
 from loguru import logger

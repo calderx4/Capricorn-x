@@ -5,7 +5,6 @@ File Tools - 文件操作工具
 sandbox=True 时限制路径在 workspace 内，sandbox=False 时允许访问任意路径。
 """
 
-from pathlib import Path
 from typing import Any, Dict
 from loguru import logger
 

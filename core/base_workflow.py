@@ -7,7 +7,7 @@ BaseWorkflow - 工作流抽象基类
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 
 class BaseWorkflow(ABC):
@@ -28,11 +28,6 @@ class BaseWorkflow(ABC):
     @property
     @abstractmethod
     def description(self) -> str:
-        pass
-
-    @property
-    @abstractmethod
-    def required_tools(self) -> List[str]:
         pass
 
     @property

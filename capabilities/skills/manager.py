@@ -8,7 +8,7 @@ Skill Manager - 技能管理器
 """
 
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from loguru import logger
 
 from .loader import SkillLoader

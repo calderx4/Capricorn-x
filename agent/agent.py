@@ -20,8 +20,6 @@ from langchain_core.messages import (
 )
 from loguru import logger
 
-from pathlib import Path
-
 from core.utils import strip_thinking_tags
 from core import trace
 from core.prompt_utils import (

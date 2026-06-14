@@ -11,7 +11,7 @@ from typing import Any, Dict, List
 from loguru import logger
 
 from core.base_tool import BaseTool
-from core.sandbox import check_path, check_command
+from core.sandbox import check_path, check_command, check_command_allowlist
 
 
 class ExecTool(BaseTool):
@@ -20,10 +20,12 @@ class ExecTool(BaseTool):
     MAX_TIMEOUT = 120  # 单条命令最长 120 秒
 
     def __init__(self, workspace_root: str = "./workspace", sandbox: bool = True,
-                 blocked_commands: List[str] = None):
+                 blocked_commands: List[str] = None,
+                 allowed_commands: List[str] = None):
         self._workspace_root = workspace_root
         self._sandbox = sandbox
         self._blocked_commands = blocked_commands or []
+        self._allowed_commands = allowed_commands or []
 
     @classmethod
     def from_config(cls, config: dict) -> "ExecTool":
@@ -31,6 +33,7 @@ class ExecTool(BaseTool):
             config["workspace_root"],
             config.get("sandbox", True),
             config.get("blocked_commands", []),
+            config.get("allowed_commands", []),
         )
 
     @property
@@ -41,7 +44,8 @@ class ExecTool(BaseTool):
     def description(self) -> str:
         return (
             "执行 shell 命令，返回 stdout/stderr/exit code。适用场景：运行脚本、安装包、git 操作、编译、测试。\n"
-            "支持 shell 特性：管道 (|)、重定向 (>/>>)、组合命令 (&&/||/;)、变量展开 ($VAR)、命令替换 ($(...))。\n"
+            "支持 shell 特性：管道 (|)、重定向 (>/>>)、组合命令 (&&/||/;)、变量展开 ($VAR)、命令替换 $(...)。\n"
+            "若配置了 allowed_commands 白名单，命令替换 $(...)、反引号、换行、单个 & 会被拒绝（防绕过白名单启动额外程序）。\n"
             "参数：cwd（工作目录）、timeout（超时秒数，默认30，最大120）。"
         )
 
@@ -69,8 +73,12 @@ class ExecTool(BaseTool):
 
     async def execute(self, command: str, cwd: str = None, timeout: int = 30) -> str:
         timeout = min(max(timeout, 1), self.MAX_TIMEOUT)
-        # 危险命令检查（独立于 sandbox）
+        # 危险命令检查（黑名单，独立于 sandbox）
         allowed, reason = check_command(command, self._blocked_commands)
+        if not allowed:
+            return f"Error: {reason}"
+        # 白名单校验（可选：配置 allowed_commands 后，只有白名单内的程序可执行）
+        allowed, reason = check_command_allowlist(command, self._allowed_commands)
         if not allowed:
             return f"Error: {reason}"
 

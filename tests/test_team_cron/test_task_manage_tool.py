@@ -42,11 +42,6 @@ def _reach_status(tool, target):
         return _transition(tool, task["id"], "need_decision")
     if target == "error":
         return _transition(tool, task["id"], "error")
-    if target == "verifying":
-        return _transition(tool, task["id"], "verifying")
-    if target == "failed":
-        task = _transition(tool, task["id"], "verifying")
-        return _transition(tool, task["id"], "failed")
     raise ValueError(f"Cannot reach status: {target}")
 
 
@@ -196,42 +191,6 @@ class TestTaskUpdateValidTransitions:
         result = _transition(tool, task["id"], "error")
         assert result["status"] == "error"
 
-    def test_running_to_verifying(self, tmp_path):
-        tool = _make_tool(str(tmp_path))
-        task = _reach_status(tool, "running")
-        result = _transition(tool, task["id"], "verifying")
-        assert result["status"] == "verifying"
-
-    def test_verifying_to_done(self, tmp_path):
-        tool = _make_tool(str(tmp_path))
-        task = _reach_status(tool, "verifying")
-        result = _transition(tool, task["id"], "done")
-        assert result["status"] == "done"
-
-    def test_verifying_to_failed(self, tmp_path):
-        tool = _make_tool(str(tmp_path))
-        task = _reach_status(tool, "verifying")
-        result = _transition(tool, task["id"], "failed")
-        assert result["status"] == "failed"
-
-    def test_verifying_to_need_decision(self, tmp_path):
-        tool = _make_tool(str(tmp_path))
-        task = _reach_status(tool, "verifying")
-        result = _transition(tool, task["id"], "need_decision")
-        assert result["status"] == "need_decision"
-
-    def test_failed_to_producing(self, tmp_path):
-        tool = _make_tool(str(tmp_path))
-        task = _reach_status(tool, "failed")
-        result = _transition(tool, task["id"], "producing")
-        assert result["status"] == "producing"
-
-    def test_failed_to_running(self, tmp_path):
-        tool = _make_tool(str(tmp_path))
-        task = _reach_status(tool, "failed")
-        result = _transition(tool, task["id"], "running")
-        assert result["status"] == "running"
-
     def test_need_decision_to_running(self, tmp_path):
         tool = _make_tool(str(tmp_path))
         task = _reach_status(tool, "need_decision")
@@ -315,39 +274,9 @@ class TestTaskUpdateAttemptsTracking:
         result = _transition(tool, task["id"], "running")
         assert result["attempts"] == 1
 
-    def test_attempts_incremented_on_verifying(self, tmp_path):
-        tool = _make_tool(str(tmp_path))
-        task = _reach_status(tool, "running")
-        result = _transition(tool, task["id"], "verifying")
-        assert result["attempts"] == 2
-
     def test_attempts_not_incremented_on_done(self, tmp_path):
         tool = _make_tool(str(tmp_path))
         task = _reach_status(tool, "running")
         assert task["attempts"] == 1
         result = _transition(tool, task["id"], "done")
         assert result["attempts"] == 1
-
-
-class TestTaskMaxAttempts:
-
-    def test_max_attempts_triggers_force_done(self, tmp_path):
-        tool = _make_tool(str(tmp_path))
-        task = _create_task(tool, max_attempts=2)
-        tid = task["id"]
-        _transition(tool, tid, "running")
-        task = _transition(tool, tid, "verifying")
-        assert task["attempts"] == 2
-        result = _transition(tool, tid, "failed")
-        assert result["status"] == "done"
-        assert result.get("quality_warning") is True
-
-    def test_max_attempts_not_triggered_below_threshold(self, tmp_path):
-        tool = _make_tool(str(tmp_path))
-        task = _create_task(tool, max_attempts=3)
-        tid = task["id"]
-        _transition(tool, tid, "running")
-        _transition(tool, tid, "verifying")
-        result = _transition(tool, tid, "failed")
-        assert result["status"] == "failed"
-        assert "quality_warning" not in result

@@ -15,6 +15,8 @@
     "reboot"
   ],
 
+  "allowed_commands": [],
+
   "llm": {
       "provider": "openai",
       "model": "MiniMax-M3",
@@ -46,6 +48,14 @@
         "MINIMAX_API_HOST": "https://api.minimaxi.com"
       },
       "enabled": true,
+      "enabled_tools": ["*"],
+      "tool_timeout": 60
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest", "--headless"],
+      "enabled": false,
       "enabled_tools": ["*"],
       "tool_timeout": 60
     }
@@ -91,6 +101,8 @@
       "enabled": true,
       "app_id": "${FEISHU_APP_ID}",
       "app_secret": "${FEISHU_APP_SECRET}",
+      "encrypt_key": "${FEISHU_ENCRYPT_KEY}",
+      "verification_token": "${FEISHU_VERIFICATION_TOKEN}",
       "allow_from": ["*"]
     }
   }
